@@ -1,0 +1,356 @@
+你问到 Ghost 技术最关键的一步了：**(a) 和 (b) 不是额外"求解"出来的，而是正常前向传播和反向传播时本来就会产生。**
+
+假设 Transformer 里有一个最普通的线性层：
+
+[
+y=Wx
+]
+
+其中：
+
+* (x)：输入
+* (W)：这一层参数
+* (y)：输出
+
+### (a) 从哪里来？
+
+前向传播时：
+
+[
+x\rightarrow W\rightarrow y
+]
+
+这个 (x) 本来就必须算出来，否则线性层连 (Wx) 都算不了。
+
+Ghost 里把它记成：
+
+[
+a=x
+]
+
+也就是 **activation（激活值/这一层输入）**。
+
+因此 (a) 直接在 forward 时缓存下来即可。
+
+---
+
+### (b) 从哪里来？
+
+模型算完 loss 以后做反向传播。
+
+反向传播会从下一层传回来：
+
+[
+\frac{\partial L}{\partial y}
+]
+
+这个东西叫：
+
+* output gradient
+* error signal
+* upstream gradient
+
+OPUS 把它记成：
+
+[
+b=\frac{\partial L}{\partial y}
+]
+
+所以：
+
+[
+\boxed{
+a=x,\qquad
+b=\frac{\partial L}{\partial y}
+}
+]
+
+这两个东西**正常训练本来就有**，不是 Ghost 额外训练出来的。OPUS 论文也是这么定义的：(a_r^{(z)}) 是 linear layer 的 input activation，(b_r^{(z)}) 是 output gradient/error signal，而且二者在正常 forward/backward 中直接可获得。
+
+---
+
+## 为什么知道 (a,b) 就能知道梯度？
+
+这个可以直接推出来。
+
+假设：
+
+[
+y_i=\sum_jW_{ij}x_j
+]
+
+我们想知道：
+
+[
+\frac{\partial L}{\partial W_{ij}}
+]
+
+链式法则：
+
+[
+\frac{\partial L}{\partial W_{ij}}
+==================================
+
+\frac{\partial L}{\partial y_i}
+\frac{\partial y_i}{\partial W_{ij}}
+]
+
+而：
+
+[
+\frac{\partial y_i}{\partial W_{ij}}=x_j
+]
+
+所以：
+
+[
+\frac{\partial L}{\partial W_{ij}}
+==================================
+
+\underbrace{\frac{\partial L}{\partial y_i}}*{b_i}
+\underbrace{x_j}*{a_j}
+]
+
+于是整个矩阵就是：
+
+[
+\nabla_WL=
+\begin{bmatrix}
+b_1a_1 & b_1a_2 &\cdots\
+b_2a_1 & b_2a_2 &\cdots\
+\vdots&&
+\end{bmatrix}
+]
+
+也就是外积：
+
+[
+\boxed{
+\nabla_WL=b,a^\top
+}
+]
+
+论文根据自己的向量定义写成：
+
+[
+a\otimes b
+]
+
+本质完全一样。
+
+举个特别小的例子。
+
+如果：
+
+[
+a=
+\begin{bmatrix}
+2\3\4
+\end{bmatrix}
+,\qquad
+b=
+\begin{bmatrix}
+5\6
+\end{bmatrix}
+]
+
+那么：
+
+[
+\nabla_WL=
+b a^\top
+========
+
+\begin{bmatrix}
+5\6
+\end{bmatrix}
+[2,3,4]
+]
+
+得到：
+
+[
+\begin{bmatrix}
+10&15&20\
+12&18&24
+\end{bmatrix}
+]
+
+所以本来应该保存一个 (2\times3=6) 个数的梯度矩阵，但实际上只要：
+
+[
+a:3个数
+]
+
+加上：
+
+[
+b:2个数
+]
+
+总共 **5 个数**，需要的时候就能恢复梯度。
+
+放到大模型里区别就很恐怖了。
+
+例如：
+
+[
+W\in\mathbb R^{4096\times4096}
+]
+
+完整梯度有：
+
+[
+4096^2\approx1678万
+]
+
+个数。
+
+但是 (a,b) 只有：
+
+[
+4096+4096=8192
+]
+
+个数。
+
+所以 Ghost 的基本收益来自：
+
+[
+\boxed{
+O(d_{\text{in}}d_{\text{out}})
+\rightarrow
+O(d_{\text{in}}+d_{\text{out}})}
+]
+
+---
+
+## 那它需要什么条件？
+
+最核心的条件有这几个。
+
+第一，**这一层最好具有这种外积梯度结构**。
+
+典型就是：
+
+[
+y=Wx
+]
+
+这样的 Linear / 全连接层。
+
+Transformer 里面大量参数都是这种东西：
+
+* Q projection
+* K projection
+* V projection
+* Attention output projection
+* MLP up projection
+* MLP down projection
+
+所以大模型特别适合这种方法。
+
+OPUS 论文也明确说它主要利用 linear layer 的 outer-product structure，并应用到一组适合的层。
+
+第二，必须能拿到：
+
+[
+\boxed{\text{前向的 activation }a}
+]
+
+和：
+
+[
+\boxed{\text{反向的 output gradient }b}
+]
+
+这通常很容易，因为深度学习框架本来就在计算它们。
+
+PyTorch 实现里概念上就是：
+
+```text
+forward:
+    保存 layer input → a
+
+backward:
+    保存 grad_output → b
+```
+
+通常可以通过 hook 或自定义 backward 获取。
+
+第三，如果你要的是**每个样本自己的梯度**，不能一开始就把 batch 维度全平均掉。
+
+例如一个 batch 有：
+
+[
+z_1,z_2,z_3
+]
+
+你需要分别保存：
+
+[
+(a_1,b_1),\quad
+(a_2,b_2),\quad
+(a_3,b_3)
+]
+
+才能得到：
+
+[
+g_1,\ g_2,\ g_3
+]
+
+而不是只得到整个 batch：
+
+[
+\frac{g_1+g_2+g_3}{3}
+]
+
+这也是为什么 Ghost 对 **per-sample gradient** 很有价值。
+
+---
+
+还有一个对 Transformer 很重要的细节：**一个文本样本里有很多 token。**
+
+严格来说，一个 token 的线性层梯度是：
+
+[
+g_t=b_ta_t^\top
+]
+
+但是一整个 sequence 有 (T) 个 token，那么：
+
+[
+\boxed{
+\nabla_WL(z)
+============
+
+\sum_{t=1}^{T}b_ta_t^\top
+}
+]
+
+所以严格来说，**整条文本的梯度不一定是一个 rank-1 外积，而是一堆 token 外积之和。**
+
+论文写：
+
+[
+\nabla_WL(z)=a^{(z)}\otimes b^{(z)}
+]
+
+是为了表达 Ghost 的核心结构；真实 Transformer 实现还要处理 token/sequence 维度的聚合。
+
+你现在可以把整个 Ghost 理解成：
+
+[
+\boxed{
+\text{Forward 拿 }a
++
+\text{Backward 拿 }b
+\Rightarrow
+\text{不用显式生成 }g
+}
+]
+
+而且 OPUS 更进一步：**它甚至通常不需要用 (a,b) 真正恢复出那个巨大梯度矩阵**，而是直接把 (a,b) 喂给 CountSketch，直接算压缩后的梯度特征。论文第 5.2 节就是这个思路。
+
+这才是 **Ghost + CountSketch** 真正省计算的地方：不是"先省着不生成梯度，最后还是生成"，而是**从头到尾都尽量不生成完整梯度**。

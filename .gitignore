@@ -1,0 +1,4 @@
+node_modules/
+dist/
+test/_fix-latex.cjs
+test/fixtures/*-fixed.txt

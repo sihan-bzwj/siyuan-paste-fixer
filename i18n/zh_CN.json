@@ -1,0 +1,10 @@
+{
+  "name": "粘贴公式修复",
+  "description": "粘贴时自动修复损坏的 LaTeX 公式并转换 MathML；选中文本右键可手动转换",
+  "convertSelection": "修复选中文本中的公式",
+  "menuConvert": "修复选中文本中的公式",
+  "noChange": "未检测到需要修复的公式",
+  "done": "公式修复完成",
+  "noSelection": "请先在文档中选中要修复的文本",
+  "fail": "转换失败"
+}
