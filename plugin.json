@@ -2,7 +2,7 @@
   "name": "paste-fixer",
   "author": "sihan-bzwj",
   "url": "https://github.com/sihan-bzwj/siyuan-paste-fixer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "3.0.0",
   "backends": [
     "all"
@@ -28,8 +28,5 @@
     "paste",
     "公式",
     "粘贴"
-  ],
-  "i18n": [
-    "zh_CN"
   ]
 }

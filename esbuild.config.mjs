@@ -26,11 +26,12 @@ for (const f of ["plugin.json", "README.md", "icon.png", "preview.png"]) {
 }
 fs.cpSync(path.join(root, "i18n"), path.join(dist, "i18n"), { recursive: true });
 
-// 打包集市发布用 package.zip（dist 内容在压缩包根目录）
+// 打包集市发布用 package.zip（dist 内容在压缩包根目录；用 Python zipfile 保证路径用正斜杠）
 if (process.argv.includes("--package")) {
-    fs.rmSync(path.join(root, "package.zip"), {force: true});
-    execSync("powershell -NoProfile -Command \"Compress-Archive -Path dist\\* -DestinationPath package.zip -Force\"", {cwd: root, stdio: "inherit"});
-    console.log("package.zip:", fs.statSync(path.join(root, "package.zip")).size, "bytes");
+    const zipPath = path.join(root, "package.zip");
+    fs.rmSync(zipPath, {force: true});
+    execSync(`python -c "import zipfile,os; z=zipfile.ZipFile('package.zip','w',zipfile.ZIP_DEFLATED); [z.write(os.path.join(r,f), os.path.relpath(os.path.join(r,f),'dist').replace(os.sep,'/')) for r,_,fs2 in os.walk('dist') for f in fs2]; z.close()"`, {cwd: root, stdio: "inherit"});
+    console.log("package.zip:", fs.statSync(zipPath).size, "bytes");
 }
 
 console.log("build done ->", dist);
