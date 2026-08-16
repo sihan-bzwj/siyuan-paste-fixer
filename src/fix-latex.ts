@@ -112,48 +112,53 @@ function looksLikeLatexBlock(content: string): boolean {
     return false;
 }
 
-/** 平衡括号扫描 `[ ... ]`，把像 LaTeX 的块转成 $$ ... $$ */
+/** 平衡括号扫描 `[ ... ]`，把像 LaTeX 的块转成 $$ ... $$。
+ *  单遍栈配对（O(n)）：病态输入（大量未闭合 `[`）不会触发 O(n²) 扫描卡死编辑器 */
 function convertBareBlocks(text: string, hold: (math: string) => string): string {
-    let out = "";
-    let i = 0;
-    while (i < text.length) {
-        const ch = text[i];
-        if (ch === "[" && text[i - 1] !== "\\") {
-            // 尝试找配对的 ]
-            let depth = 0;
-            let j = i;
-            for (; j < text.length; j++) {
-                const c = text[j];
-                if (c === "\\") {
-                    j++; // 跳过转义字符
-                    continue;
-                }
-                if (c === "[") depth++;
-                else if (c === "]") {
-                    depth--;
-                    if (depth === 0) break;
-                }
-            }
-            if (j < text.length) {
-                const content = deEscapeMath(text.slice(i + 1, j));
-                const after = text[j + 1] ?? "";
-                const looksMath = looksLikeLatexBlock(content);
-                const multiline = content.includes("\n");
-                const strongSingle = !content.includes("\\") || STRONG_TOKEN_RE.test(content) ||
-                    /\\begin\{|\\boxed\{|\\underbrace\{|\\overbrace\{/.test(content);
-                if (looksMath && (multiline || strongSingle) && after !== "(" && after !== "[") {
-                    // 去掉独占一行的 # 标题残留：# [公式] 中的 # 是渲染伪影
-                    out = out.replace(/(\n|^)([ \t]*#+[ \t]*)$/, "$1");
-                    out += hold("$$\n" + fixInsideMath(content).trim() + "\n$$");
-                    i = j + 1;
-                    continue;
-                }
+    // 找出所有顶层配对的 [ ... ]（跳过 \ 转义；内层括号不单独处理）
+    const stack: number[] = [];
+    const pairs: Array<{ start: number; end: number }> = [];
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (c === "\\") {
+            i++; // 跳过转义字符
+            continue;
+        }
+        if (c === "[") {
+            stack.push(i);
+        } else if (c === "]") {
+            const s = stack.pop();
+            if (s !== undefined && stack.length === 0) {
+                pairs.push({start: s, end: i});
             }
         }
-        out += ch;
-        i++;
     }
-    return out;
+    if (pairs.length === 0) {
+        return text;
+    }
+    // 按原顺序重组：判定通过的块替换为 $$ 公式，其余原样保留
+    const parts: string[] = [];
+    let pos = 0;
+    for (const {start, end} of pairs) {
+        const content = deEscapeMath(text.slice(start + 1, end));
+        const after = text[end + 1] ?? "";
+        const looksMath = looksLikeLatexBlock(content);
+        const multiline = content.includes("\n");
+        const strongSingle = !content.includes("\\") || STRONG_TOKEN_RE.test(content) ||
+            /\\begin\{|\\boxed\{|\\underbrace\{|\\overbrace\{/.test(content);
+        if (looksMath && (multiline || strongSingle) && after !== "(" && after !== "[") {
+            // 去掉独占一行的 # 标题残留：# [公式] 中的 # 是渲染伪影
+            let prefix = text.slice(pos, start);
+            prefix = prefix.replace(/(\n|^)([ \t]*#+[ \t]*)$/, "$1");
+            parts.push(prefix);
+            parts.push(hold("$$\n" + fixInsideMath(content).trim() + "\n$$"));
+        } else {
+            parts.push(text.slice(pos, end + 1));
+        }
+        pos = end + 1;
+    }
+    parts.push(text.slice(pos));
+    return parts.join("");
 }
 
 /** `( ... )` 内容像数学（含 LaTeX 命令或下标/上标）才转换 */

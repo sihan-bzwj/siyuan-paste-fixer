@@ -121,6 +121,18 @@ async function main() {
     out = fixLatexText("$$\\begin{bmatrix} 1&2 \\\\ 3&4 \\end{bmatrix}$$");
     contains(out, "\\\\", "真实 \\\\ 行分隔不被折叠");
 
+    console.log("\n== 1f. 边界与性能（病态输入不得卡死） ==");
+    assert(fixLatexText("") === "", "空字符串");
+    const big = "[".repeat(200000) + "\\frac{a}{b}" + "x".repeat(200000);
+    const t0 = Date.now();
+    fixLatexText(big);
+    assert(Date.now() - t0 < 5000, "40 万未闭合 [ 不卡死（O(n)）");
+    const seg = "文字段落若干。\n\n[ y=Wx ]\n\n$(a_i)$\n\n";
+    const longText = seg.repeat(3000);
+    const t1 = Date.now();
+    const longOut = fixLatexText(longText);
+    assert(Date.now() - t1 < 5000 && longOut !== longText, "120KB 长文快速转换");
+
     console.log("\n== 2. 普通文本必须原样返回 ==");
     const prose = "价格 $5 and $10，链接 [说明](https://example.com)，数组 [2,3,4]，脚本 awk '{print $1}' 正常。";
     out = fixLatexText(prose);
