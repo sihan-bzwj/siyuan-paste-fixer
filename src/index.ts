@@ -6,8 +6,6 @@ import { hasMathML, convertMathMLInHTML } from "./mathml";
 type PasteDetail = IEventBusMap["paste"];
 type MenuContentDetail = IMenuBaseDetail & { range: Range };
 
-const DIAG_DIR = "data/storage/petal/paste-fixer";
-
 /** Lute 实例的最小接口 */
 interface ILiteLute {
     Md2BlockDOM: (s: string) => string;
@@ -89,33 +87,10 @@ async function postJSON(url: string, data: unknown): Promise<void> {
 
 /**
  * 双通道粘贴修复：
- * 1. 事件总线通道（官方 paste 事件，detail 自带 protyle.lute，负责生成真公式块）
- * 2. DOM 通道（document 捕获阶段原生 paste 事件，修复后以纯文本重发，作为总线失效时的兜底）
+ * 1. 事件总线通道（官方 paste 事件）
+ * 2. DOM 通道（document 捕获阶段原生 paste 事件，修复后重新派发，作为总线失效时的兜底）
  */
 export default class PasteFixer extends Plugin {
-    private pasteCount = 0;
-
-    /** 运行时自检：每条事件一个日志文件（putFile 是 multipart 表单接口） */
-    private diag(msg: string, extra?: Record<string, unknown>) {
-        try {
-            const line = JSON.stringify({
-                t: new Date().toISOString(),
-                e: msg,
-                ...(extra || {}),
-            }) + "\n";
-            const ts = new Date().toISOString().replace(/[:.]/g, "-");
-            const fd = new FormData();
-            fd.append("path", `${DIAG_DIR}/diag-${ts}.log`);
-            fd.append("isDir", "false");
-            fd.append("file", new Blob([line], {type: "text/plain"}), "diag.log");
-            fetch("/api/file/putFile", {method: "POST", body: fd}).catch(() => {
-                // 诊断失败不影响主流程
-            });
-        } catch (e) {
-            // 诊断失败不影响主流程
-        }
-    }
-
     /** 把剪贴板载荷修复为 Markdown；无需修复时返回 null */
     private buildFixedMarkdown(textHTML: string, textPlain: string, siyuanHTML: string): string | null {
         // 内部复制且已含公式块 → 结构完整，不动
@@ -138,11 +113,10 @@ export default class PasteFixer extends Plugin {
         return changed ? fixedPlain : null;
     }
 
-    /** 通道 1：官方事件总线 paste 事件（用 detail.protyle.lute 生成真公式块） */
+    /** 通道 1：官方事件总线 paste 事件 */
     private onPaste = (event: CustomEvent<PasteDetail>) => {
         const detail = event.detail;
         const resolve = detail.resolve as unknown as (value: unknown) => void;
-        this.pasteCount++;
         try {
             const textHTML = detail.textHTML || "";
             const textPlain = detail.textPlain || "";
@@ -165,12 +139,6 @@ export default class PasteFixer extends Plugin {
                     if (sy) {
                         const hasFiles = !!files && files.length > 0;
                         if (!hasFiles) {
-                            this.diag("convert", {
-                                n: this.pasteCount,
-                                inLen: textPlain.length,
-                                outLen: plain.length,
-                                upgraded: fixed !== null,
-                            });
                             resolve({textHTML: "", textPlain: plain, siyuanHTML: sy, files});
                             return;
                         }
@@ -186,18 +154,16 @@ export default class PasteFixer extends Plugin {
             const hasFiles = !!files && files.length > 0;
             const richHTML = /<(h[1-6]|li|ul|ol|table|img|pre|blockquote|strong|b|i|em|a)[\s>]/i.test(textHTML);
             if (!hasFiles && (!richHTML || hasMathML(textHTML))) {
-                this.diag("convert", {n: this.pasteCount, inLen: textPlain.length, outLen: fixed.length});
                 resolve({textHTML: "", textPlain: fixed, siyuanHTML: "", files});
                 return;
             }
         } catch (e) {
-            const err = e instanceof Error ? e.message : String(e);
-            this.diag("error", {n: this.pasteCount, err});
+            console.error("[paste-fixer] 修复失败，按原样粘贴", e);
         }
         resolve(detail);
     };
 
-    /** 通道 2：DOM 捕获阶段拦截原生 paste，修复后以纯文本重发（不依赖事件总线） */
+    /** 通道 2：DOM 捕获阶段拦截原生 paste，修复后重新派发（不依赖事件总线） */
     private onDomPaste = (event: ClipboardEvent) => {
         try {
             if ((event as unknown as { __pasteFixer?: boolean }).__pasteFixer) {
@@ -241,10 +207,8 @@ export default class PasteFixer extends Plugin {
             });
             (redispatch as unknown as { __pasteFixer: boolean }).__pasteFixer = true;
             target.dispatchEvent(redispatch);
-            this.diag("dom-convert", {n: this.pasteCount, inLen: textPlain.length, outLen: fixed.length});
         } catch (e) {
-            const err = e instanceof Error ? e.message : String(e);
-            this.diag("dom-error", {err});
+            console.error("[paste-fixer] DOM 通道修复失败", e);
         }
     };
 
@@ -267,7 +231,6 @@ export default class PasteFixer extends Plugin {
             }
             const fixed = fixLatexText(text);
             if (fixed === text) {
-                this.diag("ui-nochange", {len: text.length, sample: text.slice(0, 200)});
                 showMessage(this.i18n.noChange, 3000);
                 return;
             }
@@ -292,11 +255,10 @@ export default class PasteFixer extends Plugin {
                 payload.parentID = parentID;
             }
             await postJSON("/api/block/insertBlock", payload);
-            this.diag("ui-convert", {inLen: text.length, outLen: fixed.length, blocks: blocks.length});
             showMessage(this.i18n.done, 3000);
         } catch (e) {
             const err = e instanceof Error ? e.message : String(e);
-            this.diag("ui-error", {err});
+            console.error("[paste-fixer] 手动转换失败", e);
             showMessage(this.i18n.fail + ": " + err, 5000, "error");
         }
     }
@@ -317,12 +279,11 @@ export default class PasteFixer extends Plugin {
                 click: () => void this.convertSelection(),
             });
         } catch (e) {
-            this.diag("menu-error", {err: e instanceof Error ? e.message : String(e)});
+            console.error("[paste-fixer] 菜单注册失败", e);
         }
     };
 
     onload() {
-        this.diag("loaded", {app: "siyuan"});
         // 通道 1：事件总线
         this.eventBus.on("paste", this.onPaste);
         this.eventBus.on("open-menu-content", this.onOpenMenuContent);
@@ -335,7 +296,7 @@ export default class PasteFixer extends Plugin {
                 callback: () => void this.convertSelection(),
             });
         } catch (e) {
-            this.diag("command-error", {err: e instanceof Error ? e.message : String(e)});
+            console.error("[paste-fixer] 命令注册失败", e);
         }
         try {
             this.addTopBar({
@@ -344,13 +305,12 @@ export default class PasteFixer extends Plugin {
                 callback: () => void this.convertSelection(),
             });
         } catch (e) {
-            this.diag("topbar-error", {err: e instanceof Error ? e.message : String(e)});
+            console.error("[paste-fixer] 顶栏按钮注册失败", e);
         }
         showMessage(this.i18n.name + " 已加载", 2000);
     }
 
     onunload() {
-        this.diag("unloaded");
         document.removeEventListener("paste", this.onDomPaste as EventListener, true);
         this.eventBus.off("paste", this.onPaste);
         this.eventBus.off("open-menu-content", this.onOpenMenuContent);
