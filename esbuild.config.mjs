@@ -21,7 +21,7 @@ await esbuild.build({
     logLevel: "info",
 });
 
-for (const f of ["plugin.json", "README.md", "icon.png", "preview.png"]) {
+for (const f of ["plugin.json", "README.md", "icon.png"]) {
     fs.copyFileSync(path.join(root, f), path.join(dist, f));
 }
 fs.cpSync(path.join(root, "i18n"), path.join(dist, "i18n"), { recursive: true });
