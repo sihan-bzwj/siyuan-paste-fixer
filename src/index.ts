@@ -49,9 +49,10 @@ function getLute(): ILiteLute | null {
  * 把修复后的 Markdown 转成思源内部块 DOM。
  * 思源前端 Lute 只解析行内数学（$$ 块会被降级成行内公式），
  * 因此 $$ 块在这里手工生成真公式块 DOM，其余内容交给 Lute 的 Md2BlockDOM。
+ * 代码围栏按段处理：围栏内的 $$ 不拆分，避免代码块被拦腰截断。
  */
 function mdToSiyuanHTML(md: string, lute: ILiteLute): string {
-    const parts = md.split(/(\$\$[\s\S]+?\$\$)/g);
+    const fenceRe = /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g;
     const out: string[] = [];
     const newId = (): string => {
         // 优先用 Lute 实例的 NewNodeID，全局 Lute 类作为兜底
@@ -61,19 +62,30 @@ function mdToSiyuanHTML(md: string, lute: ILiteLute): string {
         const globalLute = (window as unknown as {Lute?: {NewNodeID: () => string}}).Lute;
         return globalLute?.NewNodeID() ?? `${Date.now()}-pastefix`;
     };
-    for (const part of parts) {
-        if (!part.trim()) {
-            continue;
+    const process = (seg: string): void => {
+        const parts = seg.split(/(\$\$[\s\S]+?\$\$)/g);
+        for (const part of parts) {
+            if (!part.trim()) {
+                continue;
+            }
+            if (part.startsWith("$$") && part.endsWith("$$")) {
+                const latex = part.slice(2, -2).trim();
+                const attr = latex.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+                out.push(`<div data-node-id="${newId()}" data-type="NodeMathBlock" class="render-node"` +
+                    ` data-content="${attr}" data-subtype="math"><div spin="1"></div></div>`);
+            } else {
+                out.push(lute.Md2BlockDOM(part));
+            }
         }
-        if (part.startsWith("$$") && part.endsWith("$$")) {
-            const latex = part.slice(2, -2).trim();
-            const attr = latex.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-            out.push(`<div data-node-id="${newId()}" data-type="NodeMathBlock" class="render-node"` +
-                ` data-content="${attr}" data-subtype="math"><div spin="1"></div></div>`);
-        } else {
-            out.push(lute.Md2BlockDOM(part));
-        }
+    };
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = fenceRe.exec(md))) {
+        process(md.slice(last, m.index));
+        out.push(lute.Md2BlockDOM(m[0]));
+        last = fenceRe.lastIndex;
     }
+    process(md.slice(last));
     return out.join("");
 }
 
@@ -156,6 +168,21 @@ export default class PasteFixer extends Plugin {
             if (!hasFiles && (!richHTML || hasMathML(textHTML))) {
                 resolve({textHTML: "", textPlain: fixed, siyuanHTML: "", files});
                 return;
+            }
+            // 富文本但无 MathML：修复后的 Markdown 交给内核转 DOM（牺牲富格式，保住公式修复）
+            if (!hasFiles) {
+                const lute = getLute();
+                if (lute) {
+                    try {
+                        const sy = mdToSiyuanHTML(fixed, lute);
+                        if (sy) {
+                            resolve({textHTML: "", textPlain: fixed, siyuanHTML: sy, files});
+                            return;
+                        }
+                    } catch (e) {
+                        console.error("[paste-fixer] 富文本转换失败，按原样粘贴", e);
+                    }
+                }
             }
         } catch (e) {
             console.error("[paste-fixer] 修复失败，按原样粘贴", e);

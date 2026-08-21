@@ -6,13 +6,14 @@
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.mjs",
-    "test": "node test/run-tests.cjs && node test/stack-cases.cjs"
+    "test": "node test/run-tests.cjs && node test/stack-cases.cjs && node test/realworld-cases.cjs && node test/mathml-cases.cjs"
   },
   "dependencies": {
     "mathml2latex": "^1.1.3"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
+    "jsdom": "^30.0.1",
     "katex": "^0.16.0",
     "siyuan": "1.2.4",
     "typescript": "^5.9.3"

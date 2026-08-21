@@ -6,9 +6,11 @@ const t = (name, cond, extra) => {
     else { fail++; console.log(" ✗", name, extra ? "| " + JSON.stringify(extra).slice(0, 80) : ""); }
 };
 
-// 1. 含 = 的中文方括号按等号规则整体转换（既有行为，夹具依赖）
+// 1. 含中文/嵌套方括号的块不整体转换（防 [步骤=说明]、[[wiki]] 误伤）
 let r = fixLatexText("[普通 [y=Wx] 文字]");
-t("含等号嵌套块整体转换（既有规则）", r.includes("$$") && r.includes("[y=Wx]"), r);
+t("含中文嵌套块保持文本", r === "[普通 [y=Wx] 文字]", r);
+r = fixLatexText("[[y=Wx]]");
+t("双层方括号不产生夹括号公式", !r.includes("$$\n[y=Wx]\n$$") && r === "[[y=Wx]]", r);
 
 // 2. 多层嵌套不破坏输出
 r = fixLatexText("[a [b [x_i]]]");
@@ -33,6 +35,16 @@ const big = "[".repeat(50000) + "\n[y=Wx]";
 const t0 = Date.now();
 r = fixLatexText(big);
 t("5 万未闭合 [ 秒回不损坏", Date.now() - t0 < 2000 && r.length === big.length, (Date.now() - t0) + "ms");
+
+// 6b. 大量未闭合 \(：不得 O(n²) 卡死（代码里的正则字面量等场景）
+const bigParen = "\\(".repeat(50000) + "x";
+const tp0 = Date.now();
+r = fixLatexText(bigParen);
+t("5 万未闭合 \\( 秒回", Date.now() - tp0 < 2000 && r === bigParen, (Date.now() - tp0) + "ms");
+
+// 6c. 含括号的行内公式（\( f(x) \) 格式）与 500 上限内的正常匹配
+r = fixLatexText("这是 \\( f(x) = x^2 \\) 公式");
+t("含括号行内公式转 $...$", r.includes("$f(x) = x^2$"), r);
 
 // 7. 幂等性：已修复文本再过一遍不变化
 const fixed1 = fixLatexText("[ y=Wx ]");

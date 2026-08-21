@@ -133,6 +133,40 @@ async function main() {
     const longOut = fixLatexText(longText);
     assert(Date.now() - t1 < 5000 && longOut !== longText, "120KB 长文快速转换");
 
+    console.log("\n== 1g. 回归：真实场景误伤防护（网上用例驱动） ==");
+    out = fixLatexText("价格 $ 5 和 $ 10 元");
+    assert(out === "价格 $ 5 和 $ 10 元", "带空格金额不误伤", out);
+    out = fixLatexText("赚了 $ 100，花了 $ 50");
+    assert(out === "赚了 $ 100，花了 $ 50", "两处带空格金额不误伤", out);
+    out = fixLatexText("打开 (C:\\Users\\jh) 文件夹");
+    assert(out === "打开 (C:\\Users\\jh) 文件夹", "Windows 路径括号不误伤", out);
+    out = fixLatexText("哈哈 (^_^) 和 (T_T) 和 (^^) 和 (Q_Q)");
+    assert(out === "哈哈 (^_^) 和 (T_T) 和 (^^) 和 (Q_Q)", "颜文字括号不误伤", out);
+    out = fixLatexText("变量 (my_var) 已定义");
+    assert(out === "变量 (my_var) 已定义", "代码标识符括号不误伤", out);
+    out = fixLatexText("调用 foo(bar_baz) 方法");
+    assert(out === "调用 foo(bar_baz) 方法", "函数调用不误伤", out);
+    out = fixLatexText("配置 [步骤1=初始化] 完成");
+    assert(out === "配置 [步骤1=初始化] 完成", "中文方括号含等号不误伤", out);
+    out = fixLatexText("[\n中文=说明\n]");
+    assert(out === "[\n中文=说明\n]", "多行中文方括号不误伤", out);
+    out = fixLatexText("[[y=Wx]] 双括号");
+    assert(out === "[[y=Wx]] 双括号", "双层方括号不误伤", out);
+    out = fixLatexText("~~~\n[y=Wx] 和 $ x $ 是代码\n~~~");
+    assert(out === "~~~\n[y=Wx] 和 $ x $ 是代码\n~~~", "波浪线围栏内容不处理", out);
+    out = fixLatexText("值 (a_i(b)) 计算");
+    assert(out === "值 (a_i(b)) 计算", "函数调用形状括号不误伤", out);
+    // 修复能力不能退化
+    out = fixLatexText("求 [x^2] 的导数");
+    contains(out, "$$", "[x^2] 单上标现在可转");
+    out = fixLatexText("看 [a_i] 这项");
+    contains(out, "$$", "[a_i] 单下标现在可转");
+    out = fixLatexText("价格 $ 5 和 $ 10 元，但 $ x $ 是变量");
+    assert(out === "价格 $ 5 和 $ 10 元，但 $x$ 是变量", "金额与公式混合：只收公式", out);
+    out = fixLatexText("既有 $(W_{ij})$ 和 $x_i$ 不变");
+    contains(out, "$(W_{ij})$", "括号公式修复不受影响");
+    contains(out, "$x_i$", "行内公式修复不受影响");
+
     console.log("\n== 2. 普通文本必须原样返回 ==");
     const prose = "价格 $5 and $10，链接 [说明](https://example.com)，数组 [2,3,4]，脚本 awk '{print $1}' 正常。";
     out = fixLatexText(prose);

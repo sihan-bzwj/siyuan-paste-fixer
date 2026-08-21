@@ -16,10 +16,10 @@
  */
 
 const BLOCK_BRACKET_RE = /\\\[([\s\S]+?)\\\]/g; // \[ ... \]
-const INLINE_BRACKET_RE = /\\\(([^()\n]+?)\\\)/g; // \( ... \)（不跨行）
+const INLINE_BRACKET_RE = /\\\(([\s\S]{0,500}?)\\\)/g; // \( ... \)（内容可含括号，如 \( f(x) \)；上限防未闭合时 O(n²)）
 const BLOCK_DOLLAR_RE = /\$\$([\s\S]+?)\$\$/g; // $$ ... $$
-const INLINE_DOLLAR_RE = /\$([^$\n]+)\$/g; // $ ... $（单行）
-const FENCE_RE = /```[\s\S]*?(?:```|$)/g; // 代码围栏
+const INLINE_DOLLAR_RE = /\$([^$\n\u0001\u0002]+)\$/g; // $ ... $（单行；不穿过占位符）
+const FENCE_RE = /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g; // 代码围栏（反引号 + GFM 波浪线）
 
 // 占位符防止公式内容被后续规则二次处理（正文不会出现 \u0001/\u0002）
 const PH = (i: number) => `\u0001PFB${i}\u0002`;
@@ -35,14 +35,19 @@ export function looksLikeMath(text: string): boolean {
     return MATH_SIGNALS_RE.test(text) || (text.match(/\$/g) || []).length >= 2;
 }
 
+/** 双反斜杠折叠白名单：只有这些命令前的 \\ 才可能是 Markdown 转义损伤（\\frac → \frac）。
+ *  不含单字母标识符：矩阵行分隔 \\ 后紧跟下一行内容（如 \\L_3、\\c_{21}）不能被误折叠。 */
+const FOLDABLE_CMD_RE = /\\(?:frac|dfrac|tfrac|cfrac|sqrt|sum|prod|coprod|int|oint|iint|iiint|iiiint|lim|liminf|limsup|log|ln|lg|exp|sin|cos|tan|cot|sec|csc|sinh|cosh|tanh|arcsin|arccos|arctan|arg|max|min|sup|inf|det|gcd|dim|ker|Pr|deg|hom|partial|nabla|infty|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|mathbf|mathit|mathrm|mathcal|mathscr|mathbb|mathfrak|mathsf|mathtt|operatorname|text|textbf|textit|textrm|left|right|big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|begin|end|label|ref|eqref|tag|underbrace|overbrace|overline|underline|widehat|widetilde|vec|hat|bar|tilde|dot|ddot|dddot|acute|grave|breve|check|times|cdot|cdots|vdots|ddots|ldots|dots|geq|leq|geqslant|leqslant|neq|ne|approx|equiv|sim|simeq|cong|propto|to|rightarrow|longrightarrow|leftarrow|longleftarrow|Rightarrow|Longrightarrow|Leftarrow|in|notin|ni|subset|subseteq|supset|supseteq|cup|cap|forall|exists|nexists|pm|mp|circ|bullet|oplus|otimes|oslash|odot|star|ast|mid|parallel|perp|angle|langle|rangle|vert|Vert|binom|choose|pmod|mod|bmod|land|lor|neg|ell|hbar|imath|jmath|Re|Im|aleph|emptyset|varnothing|displaystyle|textstyle|scriptstyle|overset|underset|substack|boxed|smash|phantom|vphantom|hphantom|mathop|mathbin|mathrel|mathord|quad|qquad|sdot|lesssim|gtrsim|doteq|mapsto|longmapsto|hookrightarrow|iff|implies|models|vdash|dashv|therefore|because|triangle|top|bot|smallmatrix|subarray)/;
+
 /**
  * Markdown 转义还原：思源复制文本 / AI 渲染器导出时会给特殊字符加反斜杠。
- * - `\\frac` → `\frac`（命令前的双反斜杠折叠；矩阵行分隔 `\\ ` 后跟非字母不动）
+ * - `\\frac` → `\frac`（仅白名单命令前的双反斜杠折叠；矩阵行分隔 `\\ ` 后跟非字母不动）
  * - `\=` `\{` `\}` `\_` `\^` `\#` `\*` `\~` → 原字符
  */
 function deEscapeMath(content: string): string {
     let s = content;
-    s = s.replace(/\\\\(?=[a-zA-Z])/g, "\\");
+    s = s.replace(/(?<!\\)\\(\\[a-zA-Z]+)/g, (_m, cmd: string) =>
+        FOLDABLE_CMD_RE.test(cmd) ? cmd : _m);
     s = s.replace(/\\([=_^#{}*~])/g, "$1");
     return s;
 }
@@ -71,15 +76,49 @@ function fixInsideMath(content: string): string {
 function fixInlineMath(content: string): string {
     let s = deEscapeMath(content);
     if (/^\s/.test(s) && /\s$/.test(s)) {
-        s = s.trim();
+        const core = s.trim();
+        if (!core) {
+            return s; // "$ $" 空内容保持原样，防止收拢成 "$$"
+        }
+        // 只有"像数学"才收拢边界空格：不含中文/全角，且是单 token 或含数学符号。
+        // 否则（如"$ 5 和 $"这类金额）保持原样，避免把两处美元拼成一段。
+        if (!/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core) &&
+            (!/\s/.test(core) || /\\[a-zA-Z]|[_^=]/.test(core))) {
+            s = core;
+        }
     }
     return s;
+}
+
+/** 颜文字形状：T_T、^_^、^^、Q_Q、x_x、>_< 等（含 _ 或 ^ 但不是数学） */
+function looksLikeEmoticon(s: string): boolean {
+    const t = s.trim();
+    if (!/[_^]/.test(t)) {
+        return false;
+    }
+    if (/^(\w)[_^]\1$/.test(t)) {
+        return true; // T_T、x_x、Q_Q、T^T
+    }
+    if (!/[A-Za-z0-9\\{}]/.test(t)) {
+        return true; // ^_^、^^、>_< 纯符号
+    }
+    if (/^[_^]/.test(t)) {
+        return true; // _x、^2 打头
+    }
+    return false;
 }
 
 /** `[ ... ]` 内容像 LaTeX 才转换 */
 function looksLikeLatexBlock(content: string): boolean {
     if (/\](\(|\[)/.test(content)) {
         return false; // Markdown 链接/引用 [text](url)、[ref][id]
+    }
+    if (/[\[\]]/.test(content) && !/\\[bB]igg?[lrm]?\s*[\[\]]|\\left\s*[\[\]]|\\right\s*[\[\]]/.test(content)) {
+        return false; // 含裸方括号（[[wiki]]、[a [b]]）不整体转；\left[ \right] 等 LaTeX 定界符放行
+    }
+    // 中文/全角内容只有带 LaTeX 命令时才可能是公式（[步骤1=初始化] 是文本）
+    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(content) && !/\\[a-zA-Z]/.test(content)) {
+        return false;
     }
     if (/\\begin\{|\\boxed\{|\\underbrace\{|\\overbrace\{/.test(content)) {
         return true;
@@ -98,16 +137,23 @@ function looksLikeLatexBlock(content: string): boolean {
         }
         return false;
     }
-    // 无反斜杠：跨行块有下标/上标/等号即数学；单行需等号（且非逗号数组）或多处上下标
+    // 无反斜杠：跨行块有下标/上标/等号即数学；单行需等号（且非逗号数组）或上下标
     if (content.includes("\n")) {
         return /[_^=]/.test(content); // 如 [ y_i ]、[ z_1,z_2,z_3 ]
     }
     if (/=/.test(content) && !/,/.test(content)) {
         return true; // 如 [ y=Wx ]、[ a=x ]
     }
+    if (looksLikeEmoticon(content)) {
+        return false; // [T_T]、[^_^]
+    }
     const marks = content.match(/[_^]/g) || [];
     if (marks.length >= 2) {
         return true; // 如 [ z_1,z_2,z_3 ]
+    }
+    // 单处上下标且形状像变量：[a_i]、[x^2]；但 [ref_id]（双字母前缀）、[^1] 脚注不转
+    if (marks.length === 1 && /^[A-Za-z][A-Za-z0-9]?[_\^]\w/.test(content.trim())) {
+        return true;
     }
     return false;
 }
@@ -168,7 +214,21 @@ function looksLikeParenMath(content: string): boolean {
         return false; // 跨行、URL、含中文/全角符号 → 是普通括号文本
     }
     if (content.includes("\\")) {
-        return true; // LaTeX 命令，如 (a\in\mathbb R^{4096})
+        // Windows 路径（C:\、UNC \\、.\ 相对路径）不是公式
+        if (/^[a-zA-Z]:[\\/]|^\\\\|^\.[\\/]/.test(content)) {
+            return false;
+        }
+        // 必须是真正的 LaTeX 命令（\in、\frac 等）；转义形式经 deEscapeMath 已还原为符号
+        return /\\[a-zA-Z]+/.test(content);
+    }
+    if (looksLikeEmoticon(content)) {
+        return false; // (^_^)、(T_T)、(^^) 颜文字
+    }
+    if (/[a-zA-Z0-9]{2}[_^]/.test(content)) {
+        return false; // my_var、foo^bar 等代码标识符（下标/上标前只有一个字母才是常见数学写法）
+    }
+    if (/^[a-zA-Z]\w*\([^()]*\)$/.test(content)) {
+        return false; // 函数调用形状 f(x)、a_i(b)
     }
     return /[_^]/.test(content); // 下标/上标，如 (W_{ij})、(a_t, b_t)
 }
@@ -225,9 +285,14 @@ function fixTextSegment(seg: string): string {
     };
     // 1. \[ ... \] → $$ ... $$ ；\( ... \) → $ ... $（立即占位，后续规则不再处理）
     s = s.replace(BLOCK_BRACKET_RE, (_m, inner: string) => hold("$$\n" + inner.trim() + "\n$$"));
-    s = s.replace(INLINE_BRACKET_RE, (_m, inner: string) => hold("$" + inner.trim() + "$"));
+    s = s.replace(INLINE_BRACKET_RE, (_m, inner: string) => {
+        const t = inner.trim();
+        // 跨行的 \( ... \) 按块级处理（与 \[ \] 对齐）
+        return hold(t.includes("\n") ? "$$\n" + t + "\n$$" : "$" + t + "$");
+    });
     // 2. 现有 $$ 块和 $ 行内 → 占位 + 区域内修复（保持原有定界形式，不额外加换行）
-    s = s.replace(BLOCK_DOLLAR_RE, (_m, inner: string) => hold("$$" + fixInsideMath(inner) + "$$"));
+    s = s.replace(BLOCK_DOLLAR_RE, (_m, inner: string) =>
+        inner.includes("\u0001") ? _m : hold("$$" + fixInsideMath(inner) + "$$"));
     s = s.replace(INLINE_DOLLAR_RE, (_m, inner: string) => hold("$" + fixInlineMath(inner) + "$"));
     // 3. 裸 [ ... ] 块 → 占位
     s = convertBareBlocks(s, hold);
