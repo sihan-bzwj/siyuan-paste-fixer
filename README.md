@@ -4,7 +4,7 @@
 
 > 从 AI 聊天、网页、文档复制内容粘贴到思源时，公式经常显示为乱码/原文。本插件在粘贴时自动修复：
 > `[ 公式 ]` 定界、`==========` 碎片、`*{b_i}` 下标丢失、矩阵 `\` 丢反斜杠、`(W_{ij})` 括号公式、
-> 思源内部复制产生的 Markdown 转义（`y\=Wx`、`\\frac`），并把网页 MathML / MathJax / KaTeX 公式转换为可渲染的公式块。
+> 思源内部复制产生的 Markdown 转义（`y\=Wx`、`\\frac`）、裸 LaTeX 环境，并把网页 MathML / MathJax / KaTeX 公式转换为可渲染的公式块。
 > 块级公式以思源内部格式插入（真公式块，不是行内降级）。
 
 ## 解决的问题
@@ -16,6 +16,7 @@
 | AI 聊天文本（`[ 公式 ]` 定界、`==========` 碎片、`*{b_i}` 下标被斜体吃掉、矩阵 `\` 丢反斜杠） | 自动修复为思源可渲染的 `$$...$$` / `$...$` |
 | 括号包裹的行内公式 `(W_{ij})`、`(a_t,b_t)` 等 | 转成 `$(W_{ij})$` / `$(a_t,b_t)$`（仅在含 LaTeX 命令或下标/上标时转换） |
 | `\[ ... \]`、`\( ... \)`（Typora 等习惯） | 转换为 `$$...$$` / `$...$` |
+| 裸 `math`、`equation`、`align`、`gather`、`cases`、矩阵等完整环境 | 自动补成行内或块级公式；未闭合环境原样保留 |
 | 网页原生 MathML（Wikipedia、知乎等） | 转换为 LaTeX 公式 |
 | MathJax 渲染的网页（mjx-container） | 提取 assistive MathML 转换 |
 | KaTeX 渲染的网页 | 直接提取源码注解（`<annotation encoding="application/x-tex">`） |
@@ -63,16 +64,21 @@ npm install && npm run build
 
 修复后的 Markdown 会转换成思源内部格式（`text/siyuan`）随粘贴附带——**块级公式以真公式块插入**（思源前端 Lute 只解析行内数学，直接给纯文本会把 `$$` 降级成行内公式）。MathML（含 MathJax/KaTeX 源码注解）转 LaTeX 后同样处理。
 
+当剪贴板同时有 HTML 与纯文本时，插件按保真度选择来源：HTML 携带 `data-latex`、TeX annotation、MathJax v2 源码或 `alttext` 时优先 HTML；只有 MathML 反推结果而纯文本已含完整 LaTeX 时优先纯文本，避免同一公式重复或反推损失。
+
 ### LaTeX 修复规则
 
 - `[ ... ]`（含 `\`、等号、下标/上标）→ `$$ ... $$`；`\[...\]`/`\(...\)` 同理
+- 完整裸环境按类型包装：`math` → 行内，`displaymath`/`equation`/`align`/`gather`/`cases`/矩阵等 → 块级
 - `( ... )` 含 LaTeX 命令或下标/上标 → `$ ... $`（函数调用 `f(x)`、`\left(`、英文短语、链接 URL 等一律不动）
-- 思源内部复制的 Markdown 转义还原：`\\frac` → `\frac`、`\=`/`\_`/`\^`/`\{` → 原字符、`# ` 标题残留删除
+- 思源内部复制的 Markdown 转义按上下文还原：`\\frac` → `\frac`、`b\_t` → `b_t`；合法字面转义（如 `x\_1`、`\text{A\&B}`）保留
 - `*{...}` / `\*{...}` / `_*{...}` → `_{...}`（被 Markdown 斜体吃掉的下标）
 - 行尾单个 `\` → `\\`（矩阵换行）；行内 `\` + 数字（`2\3\4`）→ `\\`
 - `==========` 碎片行、公式片段间空行 → `=`（AI 渲染把等号画成了分割线）
 - `$ x $`（两侧空格）→ `$x$`（否则思源不解析）
-- 代码围栏（```）内部一律不处理
+- 数学区中的 NBSP 转普通空格，零宽字符移除；正文与 Unicode 数学符号逐字保留
+- 任意长度反引号/波浪线围栏、行内代码、链接 URL、图片路径、自动链接内部一律不处理；链接可见文字中的显式公式仍可修复
+- 不完整环境、未闭合定界符和混合定界符不猜测补齐，优先保持原文结构
 
 ## 已知限制
 
@@ -87,12 +93,13 @@ npm install && npm run build
 npm test
 ```
 
-用 KaTeX 逐一校验修复后所有公式可解析（含完整的 Ghost 论文笔记集成测试）。
+约 248 条断言覆盖 Ghost 论文笔记、真实网页 MathML、对抗性 Markdown、剪贴板双来源、幂等性和 1 MB 压力输入；新增公式均用 KaTeX 校验可解析。
 
 ## 项目结构
 
 ```
 src/index.ts       插件入口：paste 事件监听与裁决
+src/clipboard.ts   HTML/plain 剪贴板来源优先级（纯函数）
 src/fix-latex.ts   破损 LaTeX 修复逻辑（纯函数，可无头测试）
 src/mathml.ts      MathML/MathJax/KaTeX → LaTeX
 test/              无头测试（KaTeX 校验）

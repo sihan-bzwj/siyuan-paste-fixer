@@ -30,7 +30,13 @@ const IGNORE_TAGS = new Set([
 export interface MathMLResult {
     text: string;
     count: number;
+    /** exact 表示全部公式都来自网页携带的原始 TeX；derived 表示至少一个由 MathML 推导。 */
+    quality: "exact" | "derived" | "none";
+    /** 用于剪贴板裁决和诊断，顺序即首次遇到该来源的顺序。 */
+    sourceKinds: MathSourceKind[];
 }
+
+export type MathSourceKind = "data-latex" | "annotation" | "mathjax-v2" | "alttext" | "mathml";
 
 /**
  * mathml2latex 输出的已知问题消毒（KaTeX 解析不通过的部分）：
@@ -90,6 +96,13 @@ function htmlToText(root: Node): string {
 export function convertMathMLInHTML(html: string): MathMLResult {
     const doc = new DOMParser().parseFromString(html, "text/html");
     let count = 0;
+    const sourceKinds: MathSourceKind[] = [];
+    const record = (kind: MathSourceKind): void => {
+        count++;
+        if (!sourceKinds.includes(kind)) {
+            sourceKinds.push(kind);
+        }
+    };
 
     // 1. MathJax v3 的 data-latex 属性（OI Wiki 等），完整 TeX 源码，最保真
     Array.from(doc.querySelectorAll("mjx-container")).forEach((container) => {
@@ -101,7 +114,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
         const isDisplay = container.getAttribute("display") === "true" ||
             /\\begin\{equation|\\\[/.test(tex);
         container.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex.trim() + "\n$$" : "$" + tex.trim() + "$"));
-        count++;
+        record("data-latex");
     });
 
     // 2. KaTeX 等渲染器的 TeX 源码注解
@@ -125,7 +138,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             ann.closest("mjx-container")?.getAttribute("display") === "true" ||
             mathEl?.getAttribute("display") === "block";
         target.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
-        count++;
+        record("annotation");
     });
 
     // 3. MathJax v2 源码嵌入：<script type="math/tex; mode=display"> ... </script>
@@ -140,7 +153,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
         }
         const isDisplay = /display/.test(type);
         s.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
-        count++;
+        record("mathjax-v2");
     });
 
     // 4. 原生 MathML / MathJax assistive MathML：alttext（Wikipedia）优先，mathml2latex 兜底
@@ -156,7 +169,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             if (tex) {
                 const isDisplay = mml.getAttribute("display") === "block";
                 mml.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
-                count++;
+                record("alttext");
                 return;
             }
         }
@@ -170,14 +183,19 @@ export function convertMathMLInHTML(html: string): MathMLResult {
                 container.getAttribute("display") === "true";
             const wrapped = isDisplay ? "\n$$\n" + latex.trim() + "\n$$\n" : "$" + latex.trim() + "$";
             container.replaceWith(doc.createTextNode(wrapped));
-            count++;
+            record("mathml");
         } catch (e) {
             // 转换失败则保留原样
         }
     });
 
     if (count === 0) {
-        return { text: "", count: 0 };
+        return {text: "", count: 0, quality: "none", sourceKinds: []};
     }
-    return { text: htmlToText(doc.body), count };
+    return {
+        text: htmlToText(doc.body),
+        count,
+        quality: sourceKinds.includes("mathml") ? "derived" : "exact",
+        sourceKinds,
+    };
 }

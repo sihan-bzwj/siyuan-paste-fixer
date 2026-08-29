@@ -5,3 +5,4 @@ test/_fix-latex.cjs
 test/_demo-doc.md
 test/fixtures/*-fixed.txt
 test/_mathml.cjs
+test/_clipboard.cjs

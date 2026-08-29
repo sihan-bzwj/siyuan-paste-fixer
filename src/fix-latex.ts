@@ -19,11 +19,64 @@ const BLOCK_BRACKET_RE = /\\\[([\s\S]+?)\\\]/g; // \[ ... \]
 const INLINE_BRACKET_RE = /\\\(([\s\S]{0,500}?)\\\)/g; // \( ... \)（内容可含括号，如 \( f(x) \)；上限防未闭合时 O(n²)）
 const BLOCK_DOLLAR_RE = /\$\$([\s\S]+?)\$\$/g; // $$ ... $$
 const INLINE_DOLLAR_RE = /\$([^$\n\u0001\u0002]+)\$/g; // $ ... $（单行；不穿过占位符）
-const FENCE_RE = /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g; // 代码围栏（反引号 + GFM 波浪线）
 
-// 占位符防止公式内容被后续规则二次处理（正文不会出现 \u0001/\u0002）
-const PH = (i: number) => `\u0001PFB${i}\u0002`;
-const PH_RE = /\u0001PFB(\d+)\u0002/g;
+interface ProtectedRange {
+    start: number;
+    end: number;
+}
+
+export interface MarkdownSegment {
+    text: string;
+    protected: boolean;
+}
+
+/** 正则字面量转义，仅用于动态生成占位符恢复表达式。 */
+function escapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 创建与本次输入不冲突的占位符。
+ *
+ * 旧实现固定使用 \u0001PFB0\u0002；如果用户正文恰好包含同样的控制串，
+ * 恢复阶段会把用户内容误当成内部 token。这里先寻找正文中不存在的前缀，
+ * 并循环恢复嵌套占位符，使混合定界符也不会泄漏内部标记。
+ */
+function createPlaceholderCodec(input: string): {
+    hold: (math: string) => string;
+    restore: (text: string) => string;
+    contains: (text: string) => boolean;
+} {
+    let salt = 0;
+    let prefix = `\u0001PFB${salt}:`;
+    while (input.includes(prefix)) {
+        salt++;
+        prefix = `\u0001PFB${salt}:`;
+    }
+    const queue: string[] = [];
+    const tokenRe = new RegExp(escapeRegExp(prefix) + "(\\d+)\\u0002", "g");
+    return {
+        hold(math: string): string {
+            queue.push(math);
+            return `${prefix}${queue.length - 1}\u0002`;
+        },
+        restore(text: string): string {
+            let out = text;
+            // 嵌套公式最多形成 queue.length 层；多一轮用于确认已完全稳定。
+            for (let round = 0; round <= queue.length; round++) {
+                const next = out.replace(tokenRe, (_m, i: string) => queue[+i] ?? _m);
+                if (next === out) {
+                    break;
+                }
+                out = next;
+            }
+            return out;
+        },
+        contains(text: string): boolean {
+            return text.includes(prefix);
+        },
+    };
+}
 
 /** 强数学特征：单个 LaTeX 命令即可判定（用于单行 [ ... ] 块） */
 const STRONG_TOKEN_RE = /\\(?:frac|dfrac|sum|int|prod|sqrt|mathbb|left|right|text|begin|end|boxed|underbrace|overbrace|otimes|times|partial|nabla|to|rightarrow|Rightarrow|approx|cdot|cdots|vdots|ddots|top|quad|qquad|displaystyle)/;
@@ -48,13 +101,29 @@ function deEscapeMath(content: string): string {
     let s = content;
     s = s.replace(/(?<!\\)\\(\\[a-zA-Z]+)/g, (_m, cmd: string) =>
         FOLDABLE_CMD_RE.test(cmd) ? cmd : _m);
-    s = s.replace(/\\([=_^#{}*~])/g, "$1");
+    // 思源 Markdown 常把上下标连同分组花括号一起转义；成组修复可以避免
+    // 把合法的 x\_1（显示字面下划线）误改为下标。
+    s = s.replace(/\\([_^])\\?\{([^{}\n]*)\\?\}/g, "$1{$2}");
+    // `a\^\top` 这类损伤没有花括号，但后面紧跟明确的 LaTeX 命令。
+    s = s.replace(/\\([_^])(?=\\[a-zA-Z])/g, "$1");
+    // 既有真实样本会把 b_t 导出成 b\_t；字母下标按损伤修复。
+    // 数字形态 x\_1 常用于显示字面下划线，按本轮约定保留。
+    s = s.replace(/\\_([A-Za-z])/g, "_$1");
+    // 等号不是 LaTeX 转义命令，出现 \= 可以安全认定为 Markdown 残留。
+    s = s.replace(/\\=/g, "=");
     return s;
+}
+
+/** 只清理数学区域中的网页格式字符，正文必须逐字保持。 */
+function normalizeMathUnicode(content: string): string {
+    return content
+        .replace(/\u00a0/g, " ")
+        .replace(/[\u200b\u200c\u200d\ufeff]/g, "");
 }
 
 /** 数学区域内修复 */
 function fixInsideMath(content: string): string {
-    let s = content;
+    let s = normalizeMathUnicode(content);
     // Markdown 转义还原（\\frac → \frac；\= \_ \^ \{ 等还原为原字符）
     s = deEscapeMath(s);
     // 下标记号被 Markdown 斜体吃掉：_*{x}、*{x}、_\*{x}、\*{x} → _{x}
@@ -74,7 +143,7 @@ function fixInsideMath(content: string): string {
 
 /** 行内公式修复：还原 Markdown 转义；去掉两侧边界空格（$ x $ 思源不解析；但 $5 and $10 这种只右侧有空格的不动） */
 function fixInlineMath(content: string): string {
-    let s = deEscapeMath(content);
+    let s = deEscapeMath(normalizeMathUnicode(content));
     if (/^\s/.test(s) && /\s$/.test(s)) {
         const core = s.trim();
         if (!core) {
@@ -207,6 +276,81 @@ function convertBareBlocks(text: string, hold: (math: string) => string): string
     return parts.join("");
 }
 
+const INLINE_ENVIRONMENTS = new Set(["math"]);
+const STRIP_DISPLAY_ENVIRONMENTS = new Set(["displaymath", "equation", "equation*"]);
+const BLOCK_ENVIRONMENTS = new Set([
+    "align", "align*", "gather", "gather*", "multline", "multline*",
+    "cases", "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix",
+    "smallmatrix", "array", "split", "aligned", "alignedat", "gathered",
+]);
+
+/**
+ * 将完整的裸 LaTeX 环境补成思源可识别的公式。
+ * 不完整环境一律原样返回；同名环境嵌套时按深度配对，避免只截到第一个 \end。
+ */
+function convertBareEnvironments(
+    text: string,
+    hold: (math: string) => string,
+    containsPlaceholder: (text: string) => boolean,
+): string {
+    const beginRe = /\\begin\{([A-Za-z]+\*?)\}/g;
+    let out = "";
+    let pos = 0;
+    let match: RegExpExecArray | null;
+    while ((match = beginRe.exec(text))) {
+        const env = match[1];
+        if (!INLINE_ENVIRONMENTS.has(env) && !STRIP_DISPLAY_ENVIRONMENTS.has(env) &&
+            !BLOCK_ENVIRONMENTS.has(env)) {
+            continue;
+        }
+        const beginToken = match[0];
+        const endToken = `\\end{${env}}`;
+        let depth = 1;
+        let cursor = match.index + beginToken.length;
+        let end = -1;
+        while (cursor < text.length) {
+            const nextBegin = text.indexOf(beginToken, cursor);
+            const nextEnd = text.indexOf(endToken, cursor);
+            if (nextEnd < 0) {
+                break;
+            }
+            if (nextBegin >= 0 && nextBegin < nextEnd) {
+                depth++;
+                cursor = nextBegin + beginToken.length;
+                continue;
+            }
+            depth--;
+            cursor = nextEnd + endToken.length;
+            if (depth === 0) {
+                end = cursor;
+                break;
+            }
+        }
+        if (end < 0) {
+            // fail-closed：没有完整结尾时，保留从 begin 开始的全部文本。
+            break;
+        }
+        const whole = text.slice(match.index, end);
+        if (containsPlaceholder(whole)) {
+            // 已嵌套另一种公式定界符，属于混合/不规范输入，不进行猜测性包装。
+            continue;
+        }
+        const inner = text.slice(match.index + beginToken.length, end - endToken.length).trim();
+        let replacement: string;
+        if (INLINE_ENVIRONMENTS.has(env)) {
+            replacement = `$${fixInlineMath(inner)}$`;
+        } else if (STRIP_DISPLAY_ENVIRONMENTS.has(env)) {
+            replacement = `$$\n${fixInsideMath(inner)}\n$$`;
+        } else {
+            replacement = `$$\n${fixInsideMath(whole).trim()}\n$$`;
+        }
+        out += text.slice(pos, match.index) + hold(replacement);
+        pos = end;
+        beginRe.lastIndex = end;
+    }
+    return out + text.slice(pos);
+}
+
 /** `( ... )` 内容像数学（含 LaTeX 命令或下标/上标）才转换 */
 function looksLikeParenMath(content: string): boolean {
     if (content.includes("\n") || content.includes("://") ||
@@ -244,7 +388,8 @@ function convertParenMath(text: string, hold: (math: string) => string): string 
         const ch = text[i];
         const prev = text[i - 1] ?? "";
         if (ch === "(" && prev !== "\\" && !/[a-zA-Z0-9_)\]]/.test(prev) &&
-            !PAREN_GUARD_RE.test(text.slice(Math.max(0, i - 4), i))) {
+            !PAREN_GUARD_RE.test(text.slice(Math.max(0, i - 4), i)) &&
+            !isInsideUrl(text, i)) {
             // 尝试找配对的 )
             let depth = 0;
             let j = i;
@@ -275,32 +420,217 @@ function convertParenMath(text: string, hold: (math: string) => string): string 
     return out;
 }
 
+/** 判断当前位置是否位于 Markdown 目标地址或裸 URL 中。 */
+function isInsideUrl(text: string, index: number): boolean {
+    const lineStart = text.lastIndexOf("\n", index - 1) + 1;
+    const before = text.slice(lineStart, index);
+    const lastSpace = Math.max(before.lastIndexOf(" "), before.lastIndexOf("\t"));
+    const token = before.slice(lastSpace + 1);
+    if (/^(?:https?:\/\/|www\.)/i.test(token) || /(?:https?:\/\/|www\.)[^\s]*$/i.test(before)) {
+        return true;
+    }
+    const destination = before.lastIndexOf("](");
+    if (destination >= 0) {
+        // 只要目标地址还没出现顶层右括号，就视为 URL 区域。
+        let depth = 1;
+        for (let i = destination + 2; i < before.length; i++) {
+            if (before[i] === "\\") {
+                i++;
+            } else if (before[i] === "(") {
+                depth++;
+            } else if (before[i] === ")") {
+                depth--;
+            }
+        }
+        return depth > 0;
+    }
+    return false;
+}
+
 /** 单段（无代码围栏）修复 */
 function fixTextSegment(seg: string): string {
     let s = seg;
-    const queue: string[] = [];
-    const hold = (math: string): string => {
-        queue.push(math);
-        return PH(queue.length - 1);
-    };
-    // 1. \[ ... \] → $$ ... $$ ；\( ... \) → $ ... $（立即占位，后续规则不再处理）
-    s = s.replace(BLOCK_BRACKET_RE, (_m, inner: string) => hold("$$\n" + inner.trim() + "\n$$"));
-    s = s.replace(INLINE_BRACKET_RE, (_m, inner: string) => {
+    const codec = createPlaceholderCodec(seg);
+    const {hold, restore, contains} = codec;
+    // 1. 先保护已有公式。这样不规范的 $x+\(y\)+z$ 不会被改成嵌套美元公式。
+    s = s.replace(BLOCK_DOLLAR_RE, (_m, inner: string) =>
+        contains(inner) ? _m : hold("$$" + fixInsideMath(inner) + "$$"));
+    s = s.replace(INLINE_DOLLAR_RE, (_m, inner: string) => hold("$" + fixInlineMath(inner) + "$"));
+    // 2. \[ ... \] → $$ ... $$；\( ... \) → $ ... $。
+    // 内容含已有公式占位符说明是混合定界符，保持原定界符，不继续嵌套转换。
+    s = s.replace(BLOCK_BRACKET_RE, (whole, inner: string) =>
+        contains(inner) ? whole : hold("$$\n" + fixInsideMath(inner.trim()) + "\n$$"));
+    s = s.replace(INLINE_BRACKET_RE, (whole, inner: string) => {
+        if (contains(inner)) {
+            return whole;
+        }
         const t = inner.trim();
         // 跨行的 \( ... \) 按块级处理（与 \[ \] 对齐）
-        return hold(t.includes("\n") ? "$$\n" + t + "\n$$" : "$" + t + "$");
+        return hold(t.includes("\n") ? "$$\n" + fixInsideMath(t) + "\n$$" : "$" + fixInlineMath(t) + "$");
     });
-    // 2. 现有 $$ 块和 $ 行内 → 占位 + 区域内修复（保持原有定界形式，不额外加换行）
-    s = s.replace(BLOCK_DOLLAR_RE, (_m, inner: string) =>
-        inner.includes("\u0001") ? _m : hold("$$" + fixInsideMath(inner) + "$$"));
-    s = s.replace(INLINE_DOLLAR_RE, (_m, inner: string) => hold("$" + fixInlineMath(inner) + "$"));
-    // 3. 裸 [ ... ] 块 → 占位
+    // 3. 完整裸环境 → 行内或块级公式。
+    s = convertBareEnvironments(s, hold, contains);
+    // 4. 裸 [ ... ] 块 → 占位
     s = convertBareBlocks(s, hold);
-    // 4. 裸 ( ... ) 数学 → 占位
+    // 5. 裸 ( ... ) 数学 → 占位
     s = convertParenMath(s, hold);
-    // 5. 还原
-    s = s.replace(PH_RE, (_m, i: string) => queue[+i]);
-    return s;
+    // 6. 还原；restore 会处理混合输入产生的嵌套 token。
+    return restore(s);
+}
+
+/** 固定长度检查 URL 协议，避免在超长输入的每个字符处 slice 到文末导致 O(n²)。 */
+function startsHttpUrl(text: string, index: number): boolean {
+    const head = text.slice(index, index + 8).toLowerCase();
+    return head.startsWith("http://") || head.startsWith("https://");
+}
+
+/**
+ * 收集 Markdown 中必须逐字保护的范围。
+ *
+ * 这是一个小型状态扫描器而不是完整 Markdown 解析器，只负责本插件需要的边界：
+ * - 行首至多三个空格后的任意长度 ``` / ~~~ 围栏；闭合长度不得短于开头；
+ * - 任意长度行内反引号，闭合 run 必须等长；
+ * - Markdown 链接/图片目标地址、自动链接与裸 http(s) URL。
+ *
+ * 围栏或行内代码未闭合时保护到文末，符合“宁可不修复，也不破坏代码”的策略。
+ */
+function findProtectedMarkdownRanges(text: string): ProtectedRange[] {
+    const ranges: ProtectedRange[] = [];
+    let i = 0;
+    let lineStart = 0;
+    while (i < text.length) {
+        // 块围栏只允许出现在行首 0～3 个空格后。
+        const column = i - lineStart;
+        if ((text[i] === "`" || text[i] === "~") && column <= 3 &&
+            text.slice(i - column, i).trim() === "") {
+            const marker = text[i];
+            let run = 1;
+            while (text[i + run] === marker) run++;
+            if (run >= 3) {
+                const start = i - column;
+                let cursor = text.indexOf("\n", i + run);
+                if (cursor < 0) {
+                    ranges.push({start, end: text.length});
+                    break;
+                }
+                cursor++;
+                let end = text.length;
+                while (cursor < text.length) {
+                    const lineEnd = text.indexOf("\n", cursor);
+                    const limit = lineEnd < 0 ? text.length : lineEnd;
+                    let p = cursor;
+                    let spaces = 0;
+                    while (spaces < 4 && text[p] === " ") {
+                        spaces++;
+                        p++;
+                    }
+                    let closeRun = 0;
+                    while (text[p + closeRun] === marker) closeRun++;
+                    if (spaces <= 3 && closeRun >= run && text.slice(p + closeRun, limit).trim() === "") {
+                        end = lineEnd < 0 ? text.length : lineEnd + 1;
+                        break;
+                    }
+                    cursor = lineEnd < 0 ? text.length : lineEnd + 1;
+                }
+                ranges.push({start, end});
+                i = end;
+                lineStart = text.lastIndexOf("\n", i - 1) + 1;
+                continue;
+            }
+        }
+
+        // 行内代码：相同长度的反引号 run 才能闭合。
+        if (text[i] === "`") {
+            let run = 1;
+            while (text[i + run] === "`") run++;
+            let cursor = i + run;
+            let close = -1;
+            while (cursor < text.length) {
+                const next = text.indexOf("`", cursor);
+                if (next < 0) break;
+                let closeRun = 1;
+                while (text[next + closeRun] === "`") closeRun++;
+                if (closeRun === run) {
+                    close = next + closeRun;
+                    break;
+                }
+                cursor = next + closeRun;
+            }
+            const end = close < 0 ? text.length : close;
+            ranges.push({start: i, end});
+            i = end;
+            lineStart = text.lastIndexOf("\n", i - 1) + 1;
+            continue;
+        }
+
+        // Markdown 目标地址：保留 ]( 与最终 ) 给普通段，地址主体逐字保护。
+        if (text[i] === "]" && text[i + 1] === "(") {
+            let depth = 1;
+            let cursor = i + 2;
+            while (cursor < text.length && depth > 0) {
+                if (text[cursor] === "\\") {
+                    cursor += 2;
+                    continue;
+                }
+                if (text[cursor] === "(") depth++;
+                else if (text[cursor] === ")") depth--;
+                cursor++;
+            }
+            if (depth === 0) {
+                ranges.push({start: i + 2, end: cursor - 1});
+                i = cursor;
+                lineStart = text.lastIndexOf("\n", i - 1) + 1;
+                continue;
+            }
+            // 未闭合链接目标同样 fail-closed。
+            ranges.push({start: i + 2, end: text.length});
+            break;
+        }
+
+        // <https://...> 自动链接。
+        if (text[i] === "<" && startsHttpUrl(text, i + 1)) {
+            const close = text.indexOf(">", i + 1);
+            const end = close < 0 ? text.length : close + 1;
+            ranges.push({start: i, end});
+            i = end;
+            lineStart = text.lastIndexOf("\n", i - 1) + 1;
+            continue;
+        }
+
+        // 裸 URL 保护到空白或尖括号；末尾标点即使被纳入也只是原样输出。
+        if (startsHttpUrl(text, i)) {
+            let end = i;
+            while (end < text.length && !/[\s<>]/.test(text[end])) end++;
+            ranges.push({start: i, end});
+            i = end;
+            lineStart = text.lastIndexOf("\n", i - 1) + 1;
+            continue;
+        }
+        if (text[i] === "\n") {
+            lineStart = i + 1;
+        }
+        i++;
+    }
+    return ranges;
+}
+
+/** 将 Markdown 拆成可处理段与必须逐字保留段，供粘贴 DOM 生成器复用。 */
+export function splitMarkdownSegments(text: string): MarkdownSegment[] {
+    const ranges = findProtectedMarkdownRanges(text);
+    const segments: MarkdownSegment[] = [];
+    let last = 0;
+    for (const range of ranges) {
+        if (range.start < last) continue;
+        if (range.start > last) {
+            segments.push({text: text.slice(last, range.start), protected: false});
+        }
+        segments.push({text: text.slice(range.start, range.end), protected: true});
+        last = range.end;
+    }
+    if (last < text.length) {
+        segments.push({text: text.slice(last), protected: false});
+    }
+    return segments;
 }
 
 /**
@@ -308,15 +638,12 @@ function fixTextSegment(seg: string): string {
  * 无数学信号时保证返回原字符串。
  */
 export function fixLatexText(text: string): string {
-    let out = "";
-    let last = 0;
-    FENCE_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = FENCE_RE.exec(text))) {
-        out += fixTextSegment(text.slice(last, m.index));
-        out += m[0];
-        last = FENCE_RE.lastIndex;
+    if (!text) {
+        return text;
     }
-    out += fixTextSegment(text.slice(last));
+    let out = "";
+    for (const segment of splitMarkdownSegments(text)) {
+        out += segment.protected ? segment.text : fixTextSegment(segment.text);
+    }
     return out;
 }

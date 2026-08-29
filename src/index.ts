@@ -1,7 +1,8 @@
 import { Plugin, showMessage } from "siyuan";
 import type { IEventBusMap, IMenu, IMenuBaseDetail } from "siyuan";
-import { fixLatexText, looksLikeMath } from "./fix-latex";
-import { hasMathML, convertMathMLInHTML } from "./mathml";
+import {fixLatexText, looksLikeMath, splitMarkdownSegments} from "./fix-latex";
+import {hasMathML} from "./mathml";
+import {selectClipboardMarkdown} from "./clipboard";
 
 type PasteDetail = IEventBusMap["paste"];
 type MenuContentDetail = IMenuBaseDetail & { range: Range };
@@ -52,7 +53,6 @@ function getLute(): ILiteLute | null {
  * 代码围栏按段处理：围栏内的 $$ 不拆分，避免代码块被拦腰截断。
  */
 function mdToSiyuanHTML(md: string, lute: ILiteLute): string {
-    const fenceRe = /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g;
     const out: string[] = [];
     const newId = (): string => {
         // 优先用 Lute 实例的 NewNodeID，全局 Lute 类作为兜底
@@ -78,14 +78,13 @@ function mdToSiyuanHTML(md: string, lute: ILiteLute): string {
             }
         }
     };
-    let last = 0;
-    let m: RegExpExecArray | null;
-    while ((m = fenceRe.exec(md))) {
-        process(md.slice(last, m.index));
-        out.push(lute.Md2BlockDOM(m[0]));
-        last = fenceRe.lastIndex;
+    for (const segment of splitMarkdownSegments(md)) {
+        if (segment.protected) {
+            out.push(lute.Md2BlockDOM(segment.text));
+        } else {
+            process(segment.text);
+        }
     }
-    process(md.slice(last));
     return out.join("");
 }
 
@@ -103,28 +102,6 @@ async function postJSON(url: string, data: unknown): Promise<void> {
  * 2. DOM 通道（document 捕获阶段原生 paste 事件，修复后重新派发，作为总线失效时的兜底）
  */
 export default class PasteFixer extends Plugin {
-    /** 把剪贴板载荷修复为 Markdown；无需修复时返回 null */
-    private buildFixedMarkdown(textHTML: string, textPlain: string, siyuanHTML: string): string | null {
-        // 内部复制且已含公式块 → 结构完整，不动
-        if (siyuanHTML && /data-type="(?:NodeMathBlock|inline-math)"/.test(siyuanHTML)) {
-            return null;
-        }
-        const mml = hasMathML(textHTML);
-        if (!mml && !looksLikeMath(textPlain)) {
-            return null;
-        }
-        let fixedPlain = fixLatexText(textPlain);
-        let changed = fixedPlain !== textPlain;
-        if (mml) {
-            const result = convertMathMLInHTML(textHTML);
-            if (result.count > 0) {
-                fixedPlain = fixLatexText(result.text);
-                changed = true;
-            }
-        }
-        return changed ? fixedPlain : null;
-    }
-
     /** 通道 1：官方事件总线 paste 事件 */
     private onPaste = (event: CustomEvent<PasteDetail>) => {
         const detail = event.detail;
@@ -135,7 +112,8 @@ export default class PasteFixer extends Plugin {
             const siyuanHTML = detail.siyuanHTML || "";
             const files = detail.files;
 
-            const fixed = this.buildFixedMarkdown(textHTML, textPlain, siyuanHTML);
+            const decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
+            const fixed = decision?.markdown ?? null;
             const plain = fixed ?? textPlain;
 
             // 无需修复的文本，若含 $$ 块也升级为真公式块内部格式（前端 Lute 会把 $$ 降级成行内）
@@ -210,7 +188,8 @@ export default class PasteFixer extends Plugin {
             if (siyuanHTML && /data-type="(?:NodeMathBlock|inline-math)"/.test(siyuanHTML)) {
                 return;
             }
-            const fixed = this.buildFixedMarkdown(textHTML, textPlain, siyuanHTML);
+            const decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
+            const fixed = decision?.markdown ?? null;
             if (fixed === null) {
                 return; // 无需修复，放行原始粘贴
             }
