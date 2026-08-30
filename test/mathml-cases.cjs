@@ -51,6 +51,16 @@ function extractMathParagraphs(html, n) {
     return segs.join("\n");
 }
 
+function countMathTags(html) {
+    return (html.match(/<math[\s>]/gi) || []).length;
+}
+
+function countWrappedFormulas(text) {
+    const blocks = [...text.matchAll(/\$\$[\s\S]+?\$\$/g)].length;
+    const rest = text.replace(/\$\$[\s\S]+?\$\$/g, "");
+    return blocks + [...rest.matchAll(/\$[^$\n]+?\$/g)].length;
+}
+
 async function main() {
     await esbuild.build({
         entryPoints: [path.join(root, "src/mathml.ts")],
@@ -151,6 +161,38 @@ async function main() {
     assert(altres.count === 1, "alttext 转换成功（实际 " + altres.count + "）");
     assert(altres.text.includes("\\mathbf {x} ^{\\mathrm {T} }"), "alttext 还原原始 TeX", altres.text);
     katexCheck(fixLatexText(altres.text), "Wikipedia alttext 样例");
+
+    console.log("== 10. 中文 Wikipedia（CJK 正文 + 64 个 MathML） ==");
+    const zhWiki = fs.readFileSync(path.join(__dirname, "fixtures/web/wiki-zh-gauss.html"), "utf8");
+    assert(countMathTags(zhWiki) === 64, "中文夹具含 64 个 MathML");
+    const zhFrag = extractMathParagraphs(zhWiki, 12);
+    const zhFragCount = countMathTags(zhFrag);
+    const zhRes = mml.convertMathMLInHTML(zhFrag);
+    assert(zhFragCount > 10 && zhRes.count === zhFragCount,
+        "中文片段全部公式各转换一次（实际 " + zhRes.count + "/" + zhFragCount + "）");
+    assert(zhRes.quality === "exact" &&
+        zhRes.sourceKinds.some((kind) => kind === "annotation" || kind === "alttext"),
+        "中文 Wikipedia 走 exact TeX 路径");
+    assert(/[\u4e00-\u9fff]/.test(zhRes.text), "中文正文保留");
+    assert(!zhRes.text.includes("{\\displaystyle") && countWrappedFormulas(zhRes.text) === zhRes.count,
+        "fallback 图片 alt 不重复且样式外壳已剥离", zhRes.text);
+    katexCheck(fixLatexText(zhRes.text), "中文 Wikipedia 高斯消去法片段");
+
+    console.log("== 11. 英文 Wikipedia Fourier（736 个 MathML 大页面） ==");
+    const fourierWiki = fs.readFileSync(path.join(__dirname, "fixtures/web/wiki-fourier.html"), "utf8");
+    assert(countMathTags(fourierWiki) === 736, "Fourier 夹具含 736 个 MathML");
+    const fourierFrag = extractMathParagraphs(fourierWiki, 20);
+    const fourierFragCount = countMathTags(fourierFrag);
+    const fourierRes = mml.convertMathMLInHTML(fourierFrag);
+    assert(fourierFragCount > 20 && fourierRes.count === fourierFragCount,
+        "Fourier 片段全部公式各转换一次（实际 " + fourierRes.count + "/" + fourierFragCount + "）");
+    assert(fourierRes.quality === "exact" &&
+        fourierRes.sourceKinds.some((kind) => kind === "annotation" || kind === "alttext"),
+        "Fourier 页面走 exact TeX 路径");
+    assert(/Fourier|transform/i.test(fourierRes.text), "Fourier 正文保留");
+    assert(!fourierRes.text.includes("{\\displaystyle") && countWrappedFormulas(fourierRes.text) === fourierRes.count,
+        "Fourier fallback 不重复且公式数量一致", fourierRes.text);
+    katexCheck(fixLatexText(fourierRes.text), "Wikipedia Fourier 大片段");
 
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);

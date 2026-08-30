@@ -51,5 +51,28 @@ const fixed1 = fixLatexText("[ y=Wx ]");
 const fixed2 = fixLatexText(fixed1);
 t("修复幂等（二次处理不变）", fixed1 === fixed2, [fixed1, fixed2]);
 
+// 8. maskProtectedSegments：遮蔽-还原往返 + $$ 切块不误伤保护段
+const { maskProtectedSegments } = require("./_fix-latex.cjs");
+const maskSrc = "参考 [文档](https://a.com/(a_i)) 与 `code` 和 $$y=Wx$$ 结尾";
+const m = maskProtectedSegments(maskSrc);
+t("遮蔽-还原往返无损", m.restore(m.masked) === maskSrc, [m.masked]);
+t("遮蔽后 $$ 切块不含保护段内容", !m.masked.includes("(a_i)") && !m.masked.includes("`code`"), m.masked);
+t("$$ 公式仍在遮蔽文本中", m.masked.includes("$$y=Wx$$"), m.masked);
+const m2 = maskProtectedSegments("含 \u0001PFM0:\u0002 宿敌串 `x`");
+t("遮蔽占位符加盐避碰", m2.masked.includes("\u0001PFM1:0\u0002") && !m2.masked.includes("\u0001PFM0:0"), m2.masked);
+
+// 9. Lute 美元配对保护：完整公式保留，孤立美元只在 DOM 生成期间遮蔽
+const { maskLuteUnsafeDollars } = require("./_fix-latex.cjs");
+const screenshotSrc = "那条路线也能做出 \\(a_n \\to 2\\)，但要进一步求 $4^n(2-a_n)$ 的具体常数，用这个 [$2\\cos + 半角公式] 会非常干净。";
+const screenshotFixed = fixLatexText(screenshotSrc);
+const screenshotProtected = maskProtectedSegments(screenshotFixed);
+const screenshotDollar = maskLuteUnsafeDollars(screenshotProtected.masked);
+t("截图句型只遮蔽末尾未闭合美元", screenshotDollar.count === 1, screenshotDollar.masked);
+t("截图句型的两个完整公式仍交给 Lute", screenshotDollar.masked.includes("$a_n \\to 2$") && screenshotDollar.masked.includes("$4^n(2-a_n)$"), screenshotDollar.masked);
+t("截图句型未闭合 $2 不再参与 Lute 配对", !screenshotDollar.masked.includes("[$2\\cos"), screenshotDollar.masked);
+t("美元遮蔽-恢复后用户可见文本逐字不变", screenshotDollar.restore(screenshotDollar.masked) === screenshotFixed, screenshotDollar.masked);
+const amountAndMath = maskLuteUnsafeDollars("费用 $ 100 与公式 $ x $");
+t("只遮蔽金额开头并保留后方完整公式", amountAndMath.count === 1 && amountAndMath.masked.includes("$ x $"), amountAndMath.masked);
+
 console.log(fail === 0 ? "\n栈实现专项用例全部通过" : "\n失败 " + fail + " 项");
 process.exit(fail ? 1 : 0);

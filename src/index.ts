@@ -1,6 +1,11 @@
 import { Plugin, showMessage } from "siyuan";
 import type { IEventBusMap, IMenu, IMenuBaseDetail } from "siyuan";
-import {fixLatexText, looksLikeMath, splitMarkdownSegments} from "./fix-latex";
+import {
+    fixLatexText,
+    looksLikeMath,
+    maskLuteUnsafeDollars,
+    maskProtectedSegments,
+} from "./fix-latex";
 import {hasMathML} from "./mathml";
 import {selectClipboardMarkdown} from "./clipboard";
 
@@ -50,9 +55,18 @@ function getLute(): ILiteLute | null {
  * 把修复后的 Markdown 转成思源内部块 DOM。
  * 思源前端 Lute 只解析行内数学（$$ 块会被降级成行内公式），
  * 因此 $$ 块在这里手工生成真公式块 DOM，其余内容交给 Lute 的 Md2BlockDOM。
- * 代码围栏按段处理：围栏内的 $$ 不拆分，避免代码块被拦腰截断。
+ * 代码/链接/URL 等保护段先遮蔽成占位符：整段 Markdown 一次性交给 Lute 渲染
+ * （拆段渲染会切断行内结构），还原只发生在 Lute 输出的纯文本片段上；
+ * Lute 会把链接/行内代码渲染成 span，占位符落在 span 的纯文本里。
  */
 function mdToSiyuanHTML(md: string, lute: ILiteLute): string {
+    const protectedMask = maskProtectedSegments(md);
+    // 代码/链接先遮蔽，再检查剩余 Markdown 中的孤立美元。两层恢复顺序与
+    // 遮蔽顺序相反：先把美元恢复为普通 DOM 文本，再还原保护段原文。
+    const dollarMask = maskLuteUnsafeDollars(protectedMask.masked);
+    const masked = dollarMask.masked;
+    const restore = (html: string): string =>
+        protectedMask.restore(dollarMask.restore(html));
     const out: string[] = [];
     const newId = (): string => {
         // 优先用 Lute 实例的 NewNodeID，全局 Lute 类作为兜底
@@ -62,27 +76,18 @@ function mdToSiyuanHTML(md: string, lute: ILiteLute): string {
         const globalLute = (window as unknown as {Lute?: {NewNodeID: () => string}}).Lute;
         return globalLute?.NewNodeID() ?? `${Date.now()}-pastefix`;
     };
-    const process = (seg: string): void => {
-        const parts = seg.split(/(\$\$[\s\S]+?\$\$)/g);
-        for (const part of parts) {
-            if (!part.trim()) {
-                continue;
-            }
-            if (part.startsWith("$$") && part.endsWith("$$")) {
-                const latex = part.slice(2, -2).trim();
-                const attr = latex.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-                out.push(`<div data-node-id="${newId()}" data-type="NodeMathBlock" class="render-node"` +
-                    ` data-content="${attr}" data-subtype="math"><div spin="1"></div></div>`);
-            } else {
-                out.push(lute.Md2BlockDOM(part));
-            }
+    const parts = masked.split(/(\$\$[\s\S]+?\$\$)/g);
+    for (const part of parts) {
+        if (!part.trim()) {
+            continue;
         }
-    };
-    for (const segment of splitMarkdownSegments(md)) {
-        if (segment.protected) {
-            out.push(lute.Md2BlockDOM(segment.text));
+        if (part.startsWith("$$") && part.endsWith("$$") && !part.includes("\u0001")) {
+            const latex = part.slice(2, -2).trim();
+            const attr = latex.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+            out.push(`<div data-node-id="${newId()}" data-type="NodeMathBlock" class="render-node"` +
+                ` data-content="${attr}" data-subtype="math"><div spin="1"></div></div>`);
         } else {
-            process(segment.text);
+            out.push(restore(lute.Md2BlockDOM(part)));
         }
     }
     return out.join("");
@@ -143,7 +148,11 @@ export default class PasteFixer extends Plugin {
 
             const hasFiles = !!files && files.length > 0;
             const richHTML = /<(h[1-6]|li|ul|ol|table|img|pre|blockquote|strong|b|i|em|a)[\s>]/i.test(textHTML);
-            if (!hasFiles && (!richHTML || hasMathML(textHTML))) {
+            // 修复后的 Markdown 若仍含孤立/非公式美元，不能直接交给思源重新
+            // 配对；必须先走 mdToSiyuanHTML，让占位符把它固定成普通文本。
+            const protectedForCheck = maskProtectedSegments(fixed);
+            const needsDollarShield = maskLuteUnsafeDollars(protectedForCheck.masked).count > 0;
+            if (!hasFiles && (!richHTML || hasMathML(textHTML)) && !needsDollarShield) {
                 resolve({textHTML: "", textPlain: fixed, siyuanHTML: "", files});
                 return;
             }

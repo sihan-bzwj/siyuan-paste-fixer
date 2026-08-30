@@ -1,6 +1,6 @@
 {
   "name": "siyuan-paste-fixer",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "SiYuan plugin: auto-fix LaTeX and MathML on paste",
   "private": true,
   "type": "module",

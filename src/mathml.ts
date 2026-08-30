@@ -54,6 +54,18 @@ function sanitizeLatex(latex: string): string {
         .replace(/\u2061/g, "");
 }
 
+/**
+ * Wikipedia alttext 常用 `{\displaystyle ...}` 包一层样式组。
+ * 显式用匹配长度切片，避免复杂公式末尾大量花括号时替换分组产生歧义。
+ */
+function stripWikiStyleWrapper(alt: string): string {
+    const head = alt.match(/^\{\s*\\(?:displaystyle|textstyle|scriptstyle)\s+/);
+    if (head && alt.endsWith("}")) {
+        return alt.slice(head[0].length, -1).trim();
+    }
+    return alt.trim();
+}
+
 function htmlToText(root: Node): string {
     const parts: string[] = [];
     const walk = (node: Node): void => {
@@ -126,17 +138,21 @@ export function convertMathMLInHTML(html: string): MathMLResult {
         if (!enc.includes("tex") || enc.includes("mathml")) {
             return;
         }
-        const tex = (ann.textContent || "").trim();
+        const rawTex = (ann.textContent || "").trim();
+        const wikipediaRoot = ann.closest(".mwe-math-element") as HTMLElement | null;
+        const tex = wikipediaRoot ? stripWikiStyleWrapper(rawTex) : rawTex;
         if (!tex) {
             return;
         }
-        // KaTeX 整体替换 .katex；原生 MathML 替换整个 math（防止第 4 步二次转换覆盖注解结果）
+        // KaTeX/Wikipedia 都整体替换渲染根节点，防止视觉 fallback 再产生一份公式。
+        // 其他原生 MathML 替换整个 math，避免第 4 步二次转换覆盖注解结果。
         const katexRoot = ann.closest(".katex");
         const mathEl = ann.closest(MATHML_TAGS);
-        const target = (katexRoot || mathEl || ann) as HTMLElement;
+        const target = (katexRoot || wikipediaRoot || mathEl || ann) as HTMLElement;
         const isDisplay = !!ann.closest(".katex-display") ||
             ann.closest("mjx-container")?.getAttribute("display") === "true" ||
-            mathEl?.getAttribute("display") === "block";
+            mathEl?.getAttribute("display") === "block" ||
+            !!wikipediaRoot?.classList.contains("mwe-math-element-block");
         target.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
         record("annotation");
     });
@@ -162,13 +178,18 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             return; // 已被 data-latex/annotation 步骤整体替换
         }
         const mml = el as HTMLElement;
+        // Wikipedia 同时放置隐藏 MathML 与可见 fallback <img alt="原始 TeX">。
+        // 必须整体替换渲染根节点，否则 htmlToText 会把图片 alt 再提取一遍。
+        const wikipediaRoot = mml.closest(".mwe-math-element") as HTMLElement | null;
         const alt = (mml.getAttribute("alttext") || "").trim();
         if (alt) {
             // Wikipedia alttext 形如 {\displaystyle ...}，剥掉样式组外壳
-            const tex = alt.replace(/^\{\s*\\(?:display|text|script)style\s+([\s\S]*)\}$/m, "$1").trim();
+            const tex = stripWikiStyleWrapper(alt);
             if (tex) {
-                const isDisplay = mml.getAttribute("display") === "block";
-                mml.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
+                const isDisplay = mml.getAttribute("display") === "block" ||
+                    !!wikipediaRoot?.classList.contains("mwe-math-element-block");
+                (wikipediaRoot || mml).replaceWith(doc.createTextNode(
+                    isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
                 record("alttext");
                 return;
             }
@@ -178,7 +199,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             if (!latex || !latex.trim()) {
                 return;
             }
-            const container = (mml.closest("mjx-container") || mml) as HTMLElement;
+            const container = (mml.closest("mjx-container") || wikipediaRoot || mml) as HTMLElement;
             const isDisplay = mml.getAttribute("display") === "block" ||
                 container.getAttribute("display") === "true";
             const wrapped = isDisplay ? "\n$$\n" + latex.trim() + "\n$$\n" : "$" + latex.trim() + "$";

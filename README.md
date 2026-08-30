@@ -93,7 +93,7 @@ npm install && npm run build
 npm test
 ```
 
-约 248 条断言覆盖 Ghost 论文笔记、真实网页 MathML、对抗性 Markdown、剪贴板双来源、幂等性和 1 MB 压力输入；新增公式均用 KaTeX 校验可解析。
+约 283 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入；新增公式均用 KaTeX 校验可解析。
 
 ## 项目结构
 

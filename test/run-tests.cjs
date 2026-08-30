@@ -167,6 +167,39 @@ async function main() {
     contains(out, "$(W_{ij})$", "括号公式修复不受影响");
     contains(out, "$x_i$", "行内公式修复不受影响");
 
+    console.log("\n== 1h. v0.1.7 后续回归（探针确认的 bug） ==");
+    out = fixLatexText("$\\text{var\\_name}$");
+    assert(out === "$\\text{var\\_name}$", "\\text{} 内合法 \\_ 字面下划线保持", out);
+    out = fixLatexText("$\\text{a\\_b + x\\_y}$");
+    assert(out === "$\\text{a\\_b + x\\_y}$", "\\text{} 内多个 \\_ 保持", out);
+    out = fixLatexText("$\\text{端到端\\_测试}$");
+    assert(out === "$\\text{端到端\\_测试}$", "\\text{} 中文 \\_ 保持", out);
+    out = fixLatexText("\\(\\text{arg\\_max}\\) 与 \\(x_i\\)");
+    contains(out, "$\\text{arg\\_max}$", "\\( \\) 转换后 \\text{\\_} 仍保持");
+    out = fixLatexText("$(b\\_t)$");
+    contains(out, "$(b_t)$", "裸标识符 \\_ 损伤仍修复");
+    // 缩进代码块（CommonMark：前导空行 + 4 空格）
+    out = fixLatexText("正文：\n\n    const x = $ a_i $;\n");
+    assert(out === "正文：\n\n    const x = $ a_i $;\n", "缩进代码块内行内公式不动", out);
+    out = fixLatexText("    arr = [ y=Wx ];\n");
+    assert(out === "    arr = [ y=Wx ];\n", "缩进代码块内裸方括号不动", out);
+    out = fixLatexText("    f(\\(x_i\\))\n");
+    assert(out === "    f(\\(x_i\\))\n", "缩进代码块内 \\( \\) 不动", out);
+    out = fixLatexText("1. 列表项\n    延续行 (W_{ij}) 转换");
+    contains(out, "$(W_{ij})$", "列表延续行（前一行非空）不受缩进保护影响");
+    // 占位符宿敌字符串
+    const hostile = "a \u0001PFB0:\u0002 b $$y=Wx$$ c";
+    const hostileOut = fixLatexText(hostile);
+    assert(hostileOut.includes("\u0001PFB0:\u0002"), "用户正文宿敌字符串逐字保留", hostileOut);
+    assert(!hostileOut.includes("\u0001PFB1:"), "加盐 token 不泄漏", hostileOut);
+    contains(hostileOut, "y=Wx", "宿敌字符串在场时公式仍转换");
+    const hostile2 = "x \u0001PFB0:\u0002 y \u0001PFB1:\u0002 z \u0001PFB2:\u0002 $$a=b$$";
+    const hostileOut2 = fixLatexText(hostile2);
+    assert(!hostileOut2.includes("\u0001PFB3:"), "多重宿敌字符串全加盐", hostileOut2);
+    // 金额开头的 $ 不能抢走后方空格公式的开头 $。
+    out = fixLatexText("费用 $ 100 与公式 $ x $ 并存");
+    assert(out === "费用 $ 100 与公式 $x$ 并存", "空格金额与空格公式并存时只收拢公式", out);
+
     console.log("\n== 2. 普通文本必须原样返回 ==");
     const prose = "价格 $5 and $10，链接 [说明](https://example.com)，数组 [2,3,4]，脚本 awk '{print $1}' 正常。";
     out = fixLatexText(prose);

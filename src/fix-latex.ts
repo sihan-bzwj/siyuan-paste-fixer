@@ -92,6 +92,9 @@ export function looksLikeMath(text: string): boolean {
  *  不含单字母标识符：矩阵行分隔 \\ 后紧跟下一行内容（如 \\L_3、\\c_{21}）不能被误折叠。 */
 const FOLDABLE_CMD_RE = /\\(?:frac|dfrac|tfrac|cfrac|sqrt|sum|prod|coprod|int|oint|iint|iiint|iiiint|lim|liminf|limsup|log|ln|lg|exp|sin|cos|tan|cot|sec|csc|sinh|cosh|tanh|arcsin|arccos|arctan|arg|max|min|sup|inf|det|gcd|dim|ker|Pr|deg|hom|partial|nabla|infty|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|mathbf|mathit|mathrm|mathcal|mathscr|mathbb|mathfrak|mathsf|mathtt|operatorname|text|textbf|textit|textrm|left|right|big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|begin|end|label|ref|eqref|tag|underbrace|overbrace|overline|underline|widehat|widetilde|vec|hat|bar|tilde|dot|ddot|dddot|acute|grave|breve|check|times|cdot|cdots|vdots|ddots|ldots|dots|geq|leq|geqslant|leqslant|neq|ne|approx|equiv|sim|simeq|cong|propto|to|rightarrow|longrightarrow|leftarrow|longleftarrow|Rightarrow|Longrightarrow|Leftarrow|in|notin|ni|subset|subseteq|supset|supseteq|cup|cap|forall|exists|nexists|pm|mp|circ|bullet|oplus|otimes|oslash|odot|star|ast|mid|parallel|perp|angle|langle|rangle|vert|Vert|binom|choose|pmod|mod|bmod|land|lor|neg|ell|hbar|imath|jmath|Re|Im|aleph|emptyset|varnothing|displaystyle|textstyle|scriptstyle|overset|underset|substack|boxed|smash|phantom|vphantom|hphantom|mathop|mathbin|mathrel|mathord|quad|qquad|sdot|lesssim|gtrsim|doteq|mapsto|longmapsto|hookrightarrow|iff|implies|models|vdash|dashv|therefore|because|triangle|top|bot|smallmatrix|subarray)/;
 
+/** 文本模式命令：参数里的 \_ 是合法字面下划线，转义还原必须跳过这些 span。 */
+const TEXT_MODE_RE = /\\(?:text|textbf|textit|textrm|textsf|texttt|mathrm|mathit|mathbf|mathsf|mathtt|operatorname|operatorname\*)\{[^{}\n]*\}/g;
+
 /**
  * Markdown 转义还原：思源复制文本 / AI 渲染器导出时会给特殊字符加反斜杠。
  * - `\\frac` → `\frac`（仅白名单命令前的双反斜杠折叠；矩阵行分隔 `\\ ` 后跟非字母不动）
@@ -99,6 +102,12 @@ const FOLDABLE_CMD_RE = /\\(?:frac|dfrac|tfrac|cfrac|sqrt|sum|prod|coprod|int|oi
  */
 function deEscapeMath(content: string): string {
     let s = content;
+    // \text{a\_b} 等文本命令内的 \_ 是字面下划线（KaTeX 合法），先整体摘出保护
+    const textSpans: string[] = [];
+    s = s.replace(TEXT_MODE_RE, (m) => {
+        textSpans.push(m);
+        return `\u0003TX${textSpans.length - 1}\u0004`;
+    });
     s = s.replace(/(?<!\\)\\(\\[a-zA-Z]+)/g, (_m, cmd: string) =>
         FOLDABLE_CMD_RE.test(cmd) ? cmd : _m);
     // 思源 Markdown 常把上下标连同分组花括号一起转义；成组修复可以避免
@@ -111,6 +120,9 @@ function deEscapeMath(content: string): string {
     s = s.replace(/\\_([A-Za-z])/g, "_$1");
     // 等号不是 LaTeX 转义命令，出现 \= 可以安全认定为 Markdown 残留。
     s = s.replace(/\\=/g, "=");
+    if (textSpans.length) {
+        s = s.replace(/\u0003TX(\d+)\u0004/g, (_m, i: string) => textSpans[+i] ?? _m);
+    }
     return s;
 }
 
@@ -141,18 +153,19 @@ function fixInsideMath(content: string): string {
     return s;
 }
 
+/** 收拢后像数学才允许 trim：非空、不含中文/全角、单 token 或含数学符号。 */
+function looksLikeInlineTrimCore(core: string): boolean {
+    return !!core && !/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core) &&
+        (!/\s/.test(core) || /\\[a-zA-Z]|[_^=]/.test(core));
+}
+
 /** 行内公式修复：还原 Markdown 转义；去掉两侧边界空格（$ x $ 思源不解析；但 $5 and $10 这种只右侧有空格的不动） */
 function fixInlineMath(content: string): string {
     let s = deEscapeMath(normalizeMathUnicode(content));
     if (/^\s/.test(s) && /\s$/.test(s)) {
         const core = s.trim();
-        if (!core) {
-            return s; // "$ $" 空内容保持原样，防止收拢成 "$$"
-        }
-        // 只有"像数学"才收拢边界空格：不含中文/全角，且是单 token 或含数学符号。
-        // 否则（如"$ 5 和 $"这类金额）保持原样，避免把两处美元拼成一段。
-        if (!/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core) &&
-            (!/\s/.test(core) || /\\[a-zA-Z]|[_^=]/.test(core))) {
+        // 只有"像数学"才收拢边界空格；否则（如"$ 5 和 $"这类金额）保持原样。
+        if (looksLikeInlineTrimCore(core)) {
             s = core;
         }
     }
@@ -455,7 +468,28 @@ function fixTextSegment(seg: string): string {
     // 1. 先保护已有公式。这样不规范的 $x+\(y\)+z$ 不会被改成嵌套美元公式。
     s = s.replace(BLOCK_DOLLAR_RE, (_m, inner: string) =>
         contains(inner) ? _m : hold("$$" + fixInsideMath(inner) + "$$"));
-    s = s.replace(INLINE_DOLLAR_RE, (_m, inner: string) => hold("$" + fixInlineMath(inner) + "$"));
+    // 行内 $...$：手工扫描。当配对内容"两侧空格且不像数学"（金额等）时只消费开头的 $，
+    // 让后续 $ 有机会与更近的闭合配对（"费用 $ 100 与公式 $ x $" 中 $x$ 仍能转换）。
+    {
+        let outText = "";
+        let pos = 0;
+        INLINE_DOLLAR_RE.lastIndex = 0;
+        let inlineMatch: RegExpExecArray | null;
+        while ((inlineMatch = INLINE_DOLLAR_RE.exec(s))) {
+            const inner = inlineMatch[1];
+            const fixedInner = fixInlineMath(inner);
+            if (/^\s/.test(inner) && /\s$/.test(inner) &&
+                !looksLikeInlineTrimCore(inner.trim()) && fixedInner === inner) {
+                outText += s.slice(pos, inlineMatch.index + 1);
+                pos = inlineMatch.index + 1;
+                INLINE_DOLLAR_RE.lastIndex = pos;
+                continue;
+            }
+            outText += s.slice(pos, inlineMatch.index) + hold("$" + fixedInner + "$");
+            pos = inlineMatch.index + inlineMatch[0].length;
+        }
+        s = outText + s.slice(pos);
+    }
     // 2. \[ ... \] → $$ ... $$；\( ... \) → $ ... $。
     // 内容含已有公式占位符说明是混合定界符，保持原定界符，不继续嵌套转换。
     s = s.replace(BLOCK_BRACKET_RE, (whole, inner: string) =>
@@ -498,7 +532,61 @@ function findProtectedMarkdownRanges(text: string): ProtectedRange[] {
     const ranges: ProtectedRange[] = [];
     let i = 0;
     let lineStart = 0;
+    // 上一行是否为空行/纯空白（CommonMark 缩进代码块的起始条件之一）
+    const prevLineBlank = (): boolean => {
+        if (lineStart === 0) {
+            return true;
+        }
+        const prevNl = lineStart - 1;
+        const prevStart = text.lastIndexOf("\n", prevNl - 1) + 1;
+        return text.slice(prevStart, prevNl).trim() === "";
+    };
     while (i < text.length) {
+        // 缩进代码块：前一行空行 + 本行 4 空格/Tab 起（普通段落缩进不满足前导空行条件，不受影响）
+        if (i === lineStart && prevLineBlank()) {
+            let q = i;
+            let eff = 0;
+            while (text[q] === " ") {
+                eff++;
+                q++;
+            }
+            if (text[q] === "\t") {
+                eff += 4;
+            }
+            if (eff >= 4) {
+                const start = i;
+                let cursor = i;
+                let end = text.length;
+                while (cursor < text.length) {
+                    const lineEnd = text.indexOf("\n", cursor);
+                    const limit = lineEnd < 0 ? text.length : lineEnd;
+                    if (text.slice(cursor, limit).trim() === "") {
+                        cursor = lineEnd < 0 ? text.length : lineEnd + 1;
+                        continue; // 空行暂续，后续非缩进行会收口
+                    }
+                    let r = cursor;
+                    let eff2 = 0;
+                    while (text[r] === " ") {
+                        eff2++;
+                        r++;
+                    }
+                    if (text[r] === "\t") {
+                        eff2 += 4;
+                    }
+                    if (eff2 >= 4) {
+                        cursor = lineEnd < 0 ? text.length : lineEnd + 1;
+                    } else {
+                        end = cursor;
+                        break;
+                    }
+                }
+                ranges.push({start, end});
+                i = end;
+                lineStart = text.lastIndexOf("\n", i - 1) + 1;
+                continue;
+            }
+        }
+
         // 块围栏只允许出现在行首 0～3 个空格后。
         const column = i - lineStart;
         if ((text[i] === "`" || text[i] === "~") && column <= 3 &&
@@ -631,6 +719,173 @@ export function splitMarkdownSegments(text: string): MarkdownSegment[] {
         segments.push({text: text.slice(last), protected: false});
     }
     return segments;
+}
+
+export interface MaskedMarkdown {
+    /** 保护段替换为占位符后的文本：按 $$ 切块不会误伤代码/链接。 */
+    masked: string;
+    stash: string[];
+    /** 把占位符还原为保护段原文；index 非法时保留原 token。 */
+    restore: (s: string) => string;
+}
+
+export interface DollarMaskResult {
+    /** 只把可能扰乱 Lute 配对的美元符号换成占位符后的 Markdown。 */
+    masked: string;
+    /** 被遮蔽的美元符号数量；为 0 时调用方可以继续走普通纯文本通道。 */
+    count: number;
+    /** Lute 完成 Markdown 解析后再调用，把占位符恢复成可见的普通 `$` 文本。 */
+    restore: (s: string) => string;
+}
+
+/** 判断当前位置的美元符号是否已被奇数个反斜杠转义。 */
+function isEscapedDollar(text: string, index: number): boolean {
+    let slashes = 0;
+    for (let i = index - 1; i >= 0 && text[i] === "\\"; i--) {
+        slashes++;
+    }
+    return slashes % 2 === 1;
+}
+
+/**
+ * 判断一对单美元定界符中间是否足够像公式。
+ *
+ * 这里比通用的 looksLikeMath 更严格，因为目标不是“决定是否修复正文”，而是
+ * “决定是否把这两个 `$` 交给 Lute 配对”。中文句子、金额范围和 Shell 片段
+ * 一旦被误配，Lute 会把很长一段正文吞进 KaTeX；单个变量、数字、LaTeX 命令
+ * 以及带常见运算符的表达式则可以安全视为公式。
+ */
+function isReliableDollarPair(content: string): boolean {
+    const core = content.trim();
+    if (!core || /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core)) {
+        return false;
+    }
+    if (/\s/.test(core) && !/\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]/.test(core)) {
+        return false;
+    }
+    return /\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]|^[A-Za-z0-9.(),-]+$/.test(core);
+}
+
+/**
+ * 遮蔽会让 Lute 重新错配的孤立/非公式美元符号。
+ *
+ * 背景：`$4^n$ ... $2\cos` 里第一对是完整公式，最后一个 `$` 未闭合。
+ * 修复文本若直接交给 Lute，它可能从第一个 `$` 一直配到最后一个 `$`，于是
+ * 中间那个合法闭合符落入数学内容，KaTeX 报 “Can't use function '$'”。
+ *
+ * 扫描策略是 fail-closed：
+ * - 完整 `$$...$$` 原样交给 Lute；未闭合 `$$` 遮蔽；
+ * - 单美元只在内容可靠像数学时成对保留；否则先遮蔽当前 `$`，再从下一个
+ *   美元重试，使 `费用 $ 100 与公式 $ x $` 仍能识别最后的 `$ x $`；
+ * - 遮蔽只用于 Markdown→DOM 的中间过程。Lute 解析完后恢复为普通文本，
+ *   因而用户看到的字符不变，也不改变 fixLatexText 的逐字保留约定。
+ *
+ * 调用方应先用 maskProtectedSegments 遮蔽代码、链接和 URL，再把其 masked
+ * 结果传入本函数，避免检查这些保护结构内部本来就无需解析的美元符号。
+ */
+export function maskLuteUnsafeDollars(text: string): DollarMaskResult {
+    let salt = 0;
+    while (text.includes(`\u0001PFD${salt}:`)) {
+        salt++;
+    }
+    const prefix = `\u0001PFD${salt}:`;
+    const unsafe = new Set<number>();
+    let i = 0;
+
+    while (i < text.length) {
+        if (text[i] !== "$" || isEscapedDollar(text, i)) {
+            i++;
+            continue;
+        }
+
+        // 块级 $$：只接受同一段中真实闭合的下一组 $$。
+        if (text[i + 1] === "$" && !isEscapedDollar(text, i + 1)) {
+            let close = i + 2;
+            while ((close = text.indexOf("$$", close)) >= 0) {
+                if (!isEscapedDollar(text, close)) {
+                    break;
+                }
+                close += 2;
+            }
+            if (close >= 0) {
+                i = close + 2;
+                continue;
+            }
+            unsafe.add(i);
+            unsafe.add(i + 1);
+            i += 2;
+            continue;
+        }
+
+        // 行内 $：只在本行寻找下一个未转义的单美元作为候选闭合符。
+        let close = i + 1;
+        while (close < text.length && text[close] !== "\n") {
+            // 紧邻公式 `$x$$y$` 的中间两枚美元分别是前式闭合和后式开头，
+            // 因此候选闭合符后面即使还是 `$` 也不能跳过。
+            if (text[close] === "$" && !isEscapedDollar(text, close)) {
+                break;
+            }
+            close++;
+        }
+        if (close < text.length && text[close] === "$" &&
+            isReliableDollarPair(text.slice(i + 1, close))) {
+            i = close + 1;
+            continue;
+        }
+
+        // 当前候选不可靠时只遮蔽开头，下一枚 $ 仍可与其后的定界符配对。
+        unsafe.add(i);
+        i++;
+    }
+
+    if (!unsafe.size) {
+        return {masked: text, count: 0, restore: (s: string) => s};
+    }
+    let tokenIndex = 0;
+    const parts: string[] = [];
+    for (let pos = 0; pos < text.length; pos++) {
+        parts.push(unsafe.has(pos) ? `${prefix}${tokenIndex++}\u0002` : text[pos]);
+    }
+    const tokenRe = new RegExp(escapeRegExp(prefix) + "(\\d+)\\u0002", "g");
+    return {
+        masked: parts.join(""),
+        count: unsafe.size,
+        restore: (s: string): string =>
+            s.replace(tokenRe, (_m, index: string) => +index < unsafe.size ? "$" : _m),
+    };
+}
+
+/**
+ * 遮蔽保护段供 DOM 生成器使用。
+ * 与公式占位符分开编号（PFM），并按输入加盐，避免正文中的宿敌字符串碰撞。
+ */
+export function maskProtectedSegments(text: string): MaskedMarkdown {
+    let salt = 0;
+    while (text.includes(`\u0001PFM${salt}:`)) {
+        salt++;
+    }
+    const tokenRe = new RegExp(`\u0001PFM${salt}:(\\d+)\u0002`, "g");
+    const stash: string[] = [];
+    const maskedParts: string[] = [];
+    let last = 0;
+    for (const range of findProtectedMarkdownRanges(text)) {
+        if (range.start < last) {
+            continue;
+        }
+        if (range.start > last) {
+            maskedParts.push(text.slice(last, range.start));
+        }
+        stash.push(text.slice(range.start, range.end));
+        maskedParts.push(`\u0001PFM${salt}:${stash.length - 1}\u0002`);
+        last = range.end;
+    }
+    maskedParts.push(text.slice(last));
+    return {
+        masked: maskedParts.join(""),
+        stash,
+        restore: (s: string): string =>
+            stash.length ? s.replace(tokenRe, (_m, i: string) => stash[+i] ?? _m) : s,
+    };
 }
 
 /**
