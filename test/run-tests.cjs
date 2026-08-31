@@ -200,6 +200,32 @@ async function main() {
     out = fixLatexText("费用 $ 100 与公式 $ x $ 并存");
     assert(out === "费用 $ 100 与公式 $x$ 并存", "空格金额与空格公式并存时只收拢公式", out);
 
+    console.log("\n== 1i. 代码/CSS/HTML 内容守卫（用户实测：CSS 属性选择器被误转 $$） ==");
+    out = fixLatexText("html[data-theme-mode=\"dark\"] { color: #fff; }");
+    assert(out === "html[data-theme-mode=\"dark\"] { color: #fff; }", "CSS 属性选择器+引号不转", out);
+    out = fixLatexText("input[type=\"text\"] { border: 1px solid #ccc; }");
+    assert(out === "input[type=\"text\"] { border: 1px solid #ccc; }", "CSS input 选择器不转", out);
+    out = fixLatexText("a[href^=\"https\"]::after { content: \"🔗\"; }");
+    assert(out === "a[href^=\"https\"]::after { content: \"🔗\"; }", "CSS 伪元素+属性前缀不转", out);
+    // SCSS 变量（$ 触发 looksLikeMath）与属性选择器同时存在时也必须原样
+    out = fixLatexText("$dark: #fff; html[data-theme-mode=\"dark\"] { background: $dark; }");
+    assert(out === "$dark: #fff; html[data-theme-mode=\"dark\"] { background: $dark; }", "SCSS 变量+属性选择器不转", out);
+    out = fixLatexText("$font-size: 14px; body { font-size: $font-size; }");
+    assert(out === "$font-size: 14px; body { font-size: $font-size; }", "SCSS 变量纯文本不转", out);
+    out = fixLatexText("<div class=\"card\" data-id=\"123\">");
+    assert(out === "<div class=\"card\" data-id=\"123\">", "HTML 属性不转", out);
+    out = fixLatexText("[aria-label=\"关闭\"]");
+    assert(out === "[aria-label=\"关闭\"]", "CSS aria 选择器不转", out);
+    out = fixLatexText("const a = obj[\"key\"];");
+    assert(out === "const a = obj[\"key\"];", "JS 属性访问不转", out);
+    // 数学块能力不退化
+    out = fixLatexText("[ y=Wx ]");
+    contains(out, "$$", "真实数学块 y=Wx 仍转换");
+    out = fixLatexText("[ a=x ]");
+    contains(out, "$$", "数学块 a=x 仍转换");
+    out = fixLatexText("[x^2]");
+    contains(out, "$$", "数学单上标块仍转换");
+
     console.log("\n== 2. 普通文本必须原样返回 ==");
     const prose = "价格 $5 and $10，链接 [说明](https://example.com)，数组 [2,3,4]，脚本 awk '{print $1}' 正常。";
     out = fixLatexText(prose);

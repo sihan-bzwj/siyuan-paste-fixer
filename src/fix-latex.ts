@@ -198,6 +198,11 @@ function looksLikeLatexBlock(content: string): boolean {
     if (/[\[\]]/.test(content) && !/\\[bB]igg?[lrm]?\s*[\[\]]|\\left\s*[\[\]]|\\right\s*[\[\]]/.test(content)) {
         return false; // 含裸方括号（[[wiki]]、[a [b]]）不整体转；\left[ \right] 等 LaTeX 定界符放行
     }
+    // 引号是代码/CSS 属性选择器/HTML 属性的特征（[data-theme-mode="dark"]），数学公式不会有；
+    // 但 \text{"..."} 这类带引号的数学内容含 LaTeX 命令，放行
+    if (/["']/.test(content) && !/\\[a-zA-Z]/.test(content)) {
+        return false;
+    }
     // 中文/全角内容只有带 LaTeX 命令时才可能是公式（[步骤1=初始化] 是文本）
     if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(content) && !/\\[a-zA-Z]/.test(content)) {
         return false;
@@ -369,6 +374,10 @@ function looksLikeParenMath(content: string): boolean {
     if (content.includes("\n") || content.includes("://") ||
         /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(content)) {
         return false; // 跨行、URL、含中文/全角符号 → 是普通括号文本
+    }
+    // （"url", x_i）这类带引号的代码元组不是数学；\text{"..."} 含命令则放行
+    if (/["']/.test(content) && !/\\[a-zA-Z]/.test(content)) {
+        return false;
     }
     if (content.includes("\\")) {
         // Windows 路径（C:\、UNC \\、.\ 相对路径）不是公式

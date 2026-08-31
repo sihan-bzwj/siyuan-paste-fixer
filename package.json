@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.mjs",
-    "test": "node test/run-tests.cjs && node test/stack-cases.cjs && node test/realworld-cases.cjs && node test/mathml-cases.cjs && node test/adversarial.cjs && node test/clipboard-cases.cjs"
+    "test": "node test/run-tests.cjs && node test/stack-cases.cjs && node test/realworld-cases.cjs && node test/mathml-cases.cjs && node test/adversarial.cjs && node test/clipboard-cases.cjs && node test/scenario-cases.cjs"
   },
   "dependencies": {
     "mathml2latex": "^1.1.3"
