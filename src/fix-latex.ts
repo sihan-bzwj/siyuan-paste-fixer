@@ -133,9 +133,29 @@ function normalizeMathUnicode(content: string): string {
         .replace(/[\u200b\u200c\u200d\ufeff]/g, "");
 }
 
+/**
+ * 还原 AI 聊天界面把 LaTeX 命令逐字加下划线装饰的损坏形态：
+ * `\̲r̲i̲g̲h̲t̲a̲r̲r̲o̲w̲`（每个字母带 U+0332 组合下划线）→ `\rightarrow`。
+ *
+ * 贪婪匹配整个下划线字母串（命令与紧随其后的单词一并还原，如
+ * `\̲r̲i̲g̲h̲t̲a̲r̲r̲o̲w̲E̲d̲g̲e̲` → `\rightarrowEdge`）；随后把命令名后
+ * 紧跟的大写单词断回（原空格被渲染吞掉）：`\rightarrowEdge` 不是合法 TeX
+ * 命令，KaTeX 会报 undefined control sequence，还原为 `\rightarrow Edge`。
+ * 纯正文不受影响（无 `\`+装饰字母形态）。
+ */
+function restoreDecoratedCommand(text: string): string {
+    return text.replace(/\\[a-zA-Z]\u0332(?:[a-zA-Z]\u0332)+/g, (m) => {
+        const letters = m.slice(1).replace(/\u0332/g, "");
+        const split = letters.match(/^([a-zA-Z]+?)([A-Z][a-zA-Z]*)$/);
+        // 命令名后紧跟大写单词：原空格被渲染吞掉，断回（\rightarrowEdge → \rightarrow Edge）；
+        // 纯小写/无大写后缀时原样加回反斜杠。
+        return split ? "\\" + split[1] + " " + split[2] : "\\" + letters;
+    });
+}
+
 /** 数学区域内修复 */
 function fixInsideMath(content: string): string {
-    let s = normalizeMathUnicode(content);
+    let s = restoreDecoratedCommand(normalizeMathUnicode(content));
     // Markdown 转义还原（\\frac → \frac；\= \_ \^ \{ 等还原为原字符）
     s = deEscapeMath(s);
     // 下标记号被 Markdown 斜体吃掉：_*{x}、*{x}、_\*{x}、\*{x} → _{x}
@@ -161,7 +181,7 @@ function looksLikeInlineTrimCore(core: string): boolean {
 
 /** 行内公式修复：还原 Markdown 转义；去掉两侧边界空格（$ x $ 思源不解析；但 $5 and $10 这种只右侧有空格的不动） */
 function fixInlineMath(content: string): string {
-    let s = deEscapeMath(normalizeMathUnicode(content));
+    let s = restoreDecoratedCommand(deEscapeMath(normalizeMathUnicode(content)));
     if (/^\s/.test(s) && /\s$/.test(s)) {
         const core = s.trim();
         // 只有"像数学"才收拢边界空格；否则（如"$ 5 和 $"这类金额）保持原样。
@@ -481,7 +501,7 @@ function luteSafeInline(content: string): string {
 
 /** 单段（无代码围栏）修复 */
 function fixTextSegment(seg: string): string {
-    let s = seg;
+    let s = restoreDecoratedCommand(seg);
     const codec = createPlaceholderCodec(seg);
     const {hold, restore, contains} = codec;
     // 1. 先保护已有公式。这样不规范的 $x+\(y\)+z$ 不会被改成嵌套美元公式。
