@@ -25,5 +25,10 @@
   "hintCode": "已识别为代码内容，原样粘贴。如需修复公式：选中后右键「修复为公式」（可在设置中调整策略）",
   "hintAI": "已识别为 AI 数学文本，修复 {n} 个公式",
   "hintWeb": "已识别为网页公式，转换 {n} 个公式",
-  "hintMixed": "已修复 {n} 个公式"
+  "hintMixed": "已修复 {n} 个公式",
+  "quickCode": "代码内容修复公式",
+  "quickAI": "AI 数学文本修复",
+  "quickWeb": "网页公式转换",
+  "quickMixed": "混合内容修复",
+  "quickHints": "场景提示"
 }

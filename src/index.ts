@@ -1,4 +1,4 @@
-import { Plugin, showMessage } from "siyuan";
+import { Menu, Plugin, showMessage } from "siyuan";
 import type { IEventBusMap, IMenu, IMenuBaseDetail } from "siyuan";
 import {
     fixLatexText,
@@ -533,6 +533,63 @@ export default class PasteFixer extends Plugin {
         ];
     }
 
+    /** 顶栏按钮弹出开关菜单（仿 text-process）：场景策略开关即时生效 */
+    private showQuickMenu(): void {
+        try {
+            const btn = document.querySelector('[id^="plugin_paste-fixer"]');
+            const rect = btn ? btn.getBoundingClientRect() : null;
+            const menu = new Menu("paste-fixer-quick", () => {});
+            const toggle = (
+                key: "codePolicy" | "aiPolicy" | "webPolicy" | "mixedPolicy",
+                scenario: PasteScenario,
+                label: string,
+            ): void => {
+                const current = this.scenarioPolicy(scenario);
+                const on = current === "fix";
+                menu.addItem({
+                    icon: on ? "iconSelect" : "iconClose",
+                    label,
+                    click: () => {
+                        this.settings[key] = on ? "smart" : "fix";
+                        void this.saveSettings();
+                        // 重新弹菜单刷新勾选状态
+                        setTimeout(() => this.showQuickMenu(), 60);
+                    },
+                });
+            };
+            toggle("codePolicy", "code-content", this.i18n.quickCode);
+            toggle("aiPolicy", "ai-latex", this.i18n.quickAI);
+            toggle("webPolicy", "web-math", this.i18n.quickWeb);
+            toggle("mixedPolicy", "mixed", this.i18n.quickMixed);
+            const hintsOn = this.settings.hintsEnabled !== false;
+            menu.addItem({
+                icon: hintsOn ? "iconSelect" : "iconClose",
+                label: this.i18n.quickHints,
+                click: () => {
+                    this.settings.hintsEnabled = !hintsOn;
+                    void this.saveSettings();
+                    setTimeout(() => this.showQuickMenu(), 60);
+                },
+            });
+            menu.addSeparator();
+            menu.addItem({
+                icon: "iconMath",
+                label: this.i18n.menuConvert,
+                click: () => void this.convertSelection(),
+            });
+            menu.addItem({
+                icon: "iconMath",
+                label: this.i18n.menuRevert,
+                click: () => void this.revertSelection(),
+            });
+            if (rect) {
+                menu.open({x: Math.round(rect.right - 240), y: Math.round(rect.bottom + 8)});
+            }
+        } catch (e) {
+            console.error("[paste-fixer] 顶栏菜单打开失败", e);
+        }
+    }
+
     /** 策略下拉元素：变更即时落盘 */
     private buildPolicySelect(key: string, value: string): HTMLElement {
         const select = document.createElement("select");
@@ -626,7 +683,8 @@ export default class PasteFixer extends Plugin {
             this.addTopBar({
                 icon: "iconMath",
                 title: this.i18n.name,
-                callback: () => void this.convertSelection(),
+                position: "right",
+                callback: () => void this.showQuickMenu(),
             });
         } catch (e) {
             console.error("[paste-fixer] 顶栏按钮注册失败", e);
