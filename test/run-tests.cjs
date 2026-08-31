@@ -323,45 +323,9 @@ async function main() {
     assert(katexErrors3 === 0, `全部 ${blocks3.length} 块 + ${inlines3.length} 行内公式 KaTeX 可解析`);
     fs.writeFileSync(path.join(__dirname, "fixtures/ghost3-fixed.txt"), fixed3);
 
-    console.log("\n== 6. AI 界面逐字下划线损坏命令（U+0332） ==");
-    // 复制时 \rightarrow 被渲染成每个字母带组合下划线：\̲r̲i̲g̲h̲t̲a̲r̲r̲o̲w̲
-    let fixedDecor;
-    const dec = (w) => w.split("").map((c) => c + "\u0332").join("");
-    const ra = dec("rightarrow");
-    // 用户真实样本：\rightarrowEdge 的 Edge 同样被逐字装饰（复制时整串连装饰吞掉空格）
-    const boxed1 = "\\boxed{Vertex\\" + dec("rightarrowEdge") + "\\" + dec("rightarrowDegree") + "}";
-    fixedDecor = fixLatexText(boxed1);
-    assert(fixedDecor === "\\boxed{Vertex\\rightarrow Edge\\rightarrow Degree}", "boxed 公式：下划线命令还原+断词", JSON.stringify(fixedDecor));
-    let katexBoxedError = "";
-    try {
-        katex.renderToString(fixedDecor, { throwOnError: true });
-    } catch (e) {
-        katexBoxedError = e.message;
-    }
-    assert(!katexBoxedError, "还原后的 boxed 公式 KaTeX 可解析", katexBoxedError);
-    const boxed2 = "\\boxed{Walk\\" + dec("rightarrowPath") + "\\" + dec("rightarrowConnectivity") + "}";
-    fixedDecor = fixLatexText(boxed2);
-    assert(fixedDecor === "\\boxed{Walk\\rightarrow Path\\rightarrow Connectivity}", "Walk/Path/Connectivity 同样还原", JSON.stringify(fixedDecor));
-    fixedDecor = fixLatexText("\\" + dec("alpha") + "\\" + dec("beta"));
-    assert(fixedDecor === "\\alpha\\beta", "纯小写命令不误断词", JSON.stringify(fixedDecor));
-    fixedDecor = fixLatexText("公式 $x\\" + ra + " y$ 说明");
-    assert(fixedDecor === "公式 $x\\rightarrow y$ 说明", "$...$ 内部命令还原", JSON.stringify(fixedDecor));
-    fixedDecor = fixLatexText(["正常正文 \\alpha\\beta", "\\" + dec("rightarrow") + " 数学"].join("\n"));
-    assert(fixedDecor === ["正常正文 \\alpha\\beta", "\\rightarrow 数学"].join("\n"), "正文内未装饰命令原样、装饰命令还原", JSON.stringify(fixedDecor));
-    // 幂等：还原后再次执行不再变化
-    fixedDecor = fixLatexText(boxed1);
-    assert(fixLatexText(fixedDecor) === fixedDecor, "下划线还原幂等");
-    fixedDecor = fixLatexText(boxed1);
-    try {
-        katex.renderToString(fixedDecor, { throwOnError: true });
-        assert(true, "最终输出可由 KaTeX 解析");
-    } catch (e) {
-        assert(false, "最终输出可由 KaTeX 解析", e.message);
-    }
-
-    console.log("== 7. 箭头命令白名单断词（separateCommandFromEnglishWord） ==");
+    console.log("== 6. 箭头命令白名单断词（separateCommandFromEnglishWord） ==");
     let arrowOut = fixLatexText("\\boxed{Vertex\\rightarrowEdge\\rightarrowDegree}");
-    assert(arrowOut === "\\boxed{Vertex\\rightarrow Edge\\rightarrow Degree}", "裸文本 \\rightarrowEdge 断词", JSON.stringify(arrowOut));
+    assert(arrowOut === "\\boxed{Vertex\\rightarrow Edge\\rightarrow Degree}", "图论 boxed 公式断词（用户样本）", JSON.stringify(arrowOut));
     arrowOut = fixLatexText("\\boxed{Walk\\rightarrowPath\\rightarrowConnectivity}");
     assert(arrowOut === "\\boxed{Walk\\rightarrow Path\\rightarrow Connectivity}", "Walk/Path/Connectivity 断词", JSON.stringify(arrowOut));
     arrowOut = fixLatexText("A\\rightarrow B");
@@ -370,10 +334,18 @@ async function main() {
     assert(arrowOut === "\\rightarrowtail", "\\rightarrowtail 合法命令不变", JSON.stringify(arrowOut));
     arrowOut = fixLatexText("\\top T 与 \\to B");
     assert(arrowOut === "\\top T 与 \\to B", "\\top 不变、\\to 后大写才补", JSON.stringify(arrowOut));
-    arrowOut = fixLatexText("\\mapsto X");
-    assert(arrowOut === "\\mapsto X", "白名单内 \\mapsto 后大写补分隔", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("\\mapstoX");
+    assert(arrowOut === "\\mapsto X", "\\mapstoX 断词（无空格输入）", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("\\toPath");
+    assert(arrowOut === "\\to Path", "\\toPath 断词", JSON.stringify(arrowOut));
     arrowOut = fixLatexText("$\\rightarrowEdge$");
     assert(arrowOut === "$\\rightarrow Edge$", "$...$ 内部同样断词", JSON.stringify(arrowOut));
+    try {
+        katex.renderToString("\\boxed{Vertex\\rightarrow Edge\\rightarrow Degree}", { throwOnError: true });
+        assert(true, "断词后的 boxed 公式 KaTeX 可解析");
+    } catch (e) {
+        assert(false, "断词后的 boxed 公式 KaTeX 可解析", e.message);
+    }
 
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);

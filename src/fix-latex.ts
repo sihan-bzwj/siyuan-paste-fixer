@@ -134,17 +134,6 @@ function normalizeMathUnicode(content: string): string {
 }
 
 /**
- * 还原 AI 聊天界面把 LaTeX 命令逐字加下划线装饰的损坏形态：
- * `\̲r̲i̲g̲h̲t̲a̲r̲r̲o̲w̲E̲d̲g̲e̲`（每个字母带 U+0332 组合下划线）→ `\rightarrowEdge`。
- * 只还原装饰字符，不断词——断词由 separateCommandFromEnglishWord 白名单处理。
- * 纯正文不受影响（无 `\`+装饰字母形态）。
- */
-function restoreDecoratedCommand(text: string): string {
-    return text.replace(/\\[a-zA-Z]\u0332(?:[a-zA-Z]\u0332)+/g, (m) =>
-        "\\" + m.slice(1).replace(/\u0332/g, ""));
-}
-
-/**
  * 箭头/关系命令后紧跟英文单词时补分隔（白名单 + 大写字母 lookahead）：
  * `\rightarrowEdge` → `\rightarrow Edge`（KaTeX 会把连续字母整段当命令名，
  * 报 Undefined control sequence: \rightarrowEdge）。
@@ -161,7 +150,7 @@ function separateCommandFromEnglishWord(s: string): string {
 
 /** 数学区域内修复 */
 function fixInsideMath(content: string): string {
-    let s = restoreDecoratedCommand(normalizeMathUnicode(content));
+    let s = normalizeMathUnicode(content);
     // Markdown 转义还原（\\frac → \frac；\= \_ \^ \{ 等还原为原字符）
     s = deEscapeMath(s);
     // 箭头命令后紧跟大写英文词：补分隔（\rightarrowEdge → \rightarrow Edge）
@@ -189,7 +178,7 @@ function looksLikeInlineTrimCore(core: string): boolean {
 
 /** 行内公式修复：还原 Markdown 转义；去掉两侧边界空格（$ x $ 思源不解析；但 $5 and $10 这种只右侧有空格的不动） */
 function fixInlineMath(content: string): string {
-    let s = separateCommandFromEnglishWord(restoreDecoratedCommand(deEscapeMath(normalizeMathUnicode(content))));
+    let s = separateCommandFromEnglishWord(deEscapeMath(normalizeMathUnicode(content)));
     if (/^\s/.test(s) && /\s$/.test(s)) {
         const core = s.trim();
         // 只有"像数学"才收拢边界空格；否则（如"$ 5 和 $"这类金额）保持原样。
@@ -509,7 +498,7 @@ function luteSafeInline(content: string): string {
 
 /** 单段（无代码围栏）修复 */
 function fixTextSegment(seg: string): string {
-    let s = separateCommandFromEnglishWord(restoreDecoratedCommand(seg));
+    let s = separateCommandFromEnglishWord(seg);
     const codec = createPlaceholderCodec(seg);
     const {hold, restore, contains} = codec;
     // 1. 先保护已有公式。这样不规范的 $x+\(y\)+z$ 不会被改成嵌套美元公式。
