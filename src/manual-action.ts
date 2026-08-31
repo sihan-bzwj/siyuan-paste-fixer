@@ -113,24 +113,49 @@ export function captureManualContext(range: Range, protyle: unknown): ManualCont
     };
 }
 
-/** 选区是否覆盖块的完整文本内容（首尾文本节点边界对齐；无文本块按元素边界比较）。 */
-function selectionCoversBlockText(range: Range, block: HTMLElement): boolean {
-    const textNodes: Text[] = [];
-    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-    let n: Node | null = walker.nextNode();
-    while (n) {
-        textNodes.push(n as Text);
-        n = walker.nextNode();
+/**
+ * 片段是否含“有效内容”（整块判定用）：非空文本、思源语义节点、图像/链接等
+ * 都算有效；空 Text、<wbr>/<br>、纯容器节点忽略。
+ */
+function hasMeaningfulContent(node: Node): boolean {
+    if (node.nodeType === 3) {
+        return Boolean((node as Text).data.trim());
     }
-    if (textNodes.length === 0) {
-        // 无文本（如 NodeMathBlock）：范围必须恰好覆盖块元素本身
-        return range.startContainer === block && range.startOffset === 0 &&
-            range.endContainer === block && range.endOffset === block.childNodes.length;
+    if (node.nodeType === 11) {
+        return Array.from(node.childNodes).some(hasMeaningfulContent);
     }
-    const first = textNodes[0];
-    const last = textNodes[textNodes.length - 1];
-    return range.startContainer === first && range.startOffset === 0 &&
-        range.endContainer === last && range.endOffset === last.length;
+    if (node.nodeType !== 1) {
+        return true;
+    }
+    const el = node as Element;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "wbr" || tag === "br") {
+        return false;
+    }
+    if (el.hasAttribute("data-type") || el.hasAttribute("data-subtype")) {
+        return true; // inline-math 等思源语义节点（无文本但承载公式）
+    }
+    if (tag === "div" || tag === "span" || tag === "p") {
+        return Array.from(el.childNodes).some(hasMeaningfulContent);
+    }
+    return true; // img/a/code/strong/... 一律有效
+}
+
+/**
+ * 选区前后是否还有未选中的有效内容。
+ *
+ * 整块判定不能只看“首尾文本节点”：inline-math 等无文本元素在块首/块尾时，
+ * 只选正文也会被误判为整块，updateBlock 会覆盖掉未选中的公式。因此比较
+ * 块开头→range 起点、range 终点→块末尾 两段 cloneContents 是否含有效内容。
+ */
+function hasUnselectedContent(block: HTMLElement, range: Range): boolean {
+    const prefix = document.createRange();
+    prefix.selectNodeContents(block);
+    prefix.setEnd(range.startContainer, range.startOffset);
+    const suffix = document.createRange();
+    suffix.selectNodeContents(block);
+    suffix.setStart(range.endContainer, range.endOffset);
+    return hasMeaningfulContent(prefix.cloneContents()) || hasMeaningfulContent(suffix.cloneContents());
 }
 
 /** 判定选区类型：局部行内 / 完整单块 / 跨块（起止最近块不同即跨块）。 */
@@ -148,23 +173,44 @@ export function classifyRange(
     if (block !== endBlock) {
         return "cross-block";
     }
-    return selectionCoversBlockText(range, block) ? "whole-block" : "local-inline";
+    if (block.getAttribute("data-type") === "NodeMathBlock") {
+        return "whole-block";
+    }
+    // 前后都无未选中内容才算完整选中整块
+    return hasUnselectedContent(block, range) ? "local-inline" : "whole-block";
 }
 
-/** 完整块可能因转换丢掉的复杂行内格式（加粗/链接/行内代码/标签/引用等）；公式节点不算。 */
-const RICH_FORMAT_SELECTOR = [
-    "strong", "b", "em", "i", "u", "s", "del", "mark", "ins", "sub", "sup",
-    "a[href]", "code", "blockquote",
-    '[data-type="NodeCodeSpan"]', '[data-type="NodeInlineCode"]',
-    '[data-type="tag"]', '[data-type="footnotes-ref"]', '[data-type="block-ref"]',
-].join(",");
+/**
+ * 完整块内是否含白名单之外的语义元素（用于整块转换保护）。
+ *
+ * fail-closed：整块 updateBlock 只允许 文本节点 / inline-math / 纯容器
+ * （div/span/p），其余一切有语义的元素（加粗、链接、行内代码、标签、引用、
+ * 以及未来未知的插件 inline 节点）都拒绝转换，绝不静默丢格式。
+ */
+function hasUnsafeRichElement(node: Node): boolean {
+    if (node.nodeType === 3) {
+        return false;
+    }
+    if (node.nodeType !== 1) {
+        return true;
+    }
+    const el = node as Element;
+    if (el.getAttribute("data-type") === "inline-math") {
+        return false;
+    }
+    const tag = el.tagName.toLowerCase();
+    if (tag === "div" || tag === "span" || tag === "p") {
+        return Array.from(el.childNodes).some(hasUnsafeRichElement);
+    }
+    return true;
+}
 
-/** 块内是否含复杂格式：有则整块转换会静默丢格式，0.2.3 暂时拒绝。 */
+/** 块内是否含需要拒绝整块转换的语义元素。 */
 export function hasRichFormatting(block: HTMLElement | null): boolean {
     if (!block) {
         return false;
     }
-    return block.querySelector(RICH_FORMAT_SELECTOR) !== null;
+    return Array.from(block.childNodes).some(hasUnsafeRichElement);
 }
 
 /** insertNode 在文本节点边界插入时会把容器文本劈开、留下空 Text 尾巴，清掉（不影响内容）。 */
@@ -232,9 +278,14 @@ export async function applyWholeBlock(
 
 /**
  * 从选区还原源码形态（渲染公式 span 无文本内容，需要从 DOM 取回 $...$ 源码）。
- * 局部选区只序列化 range 内部；完整公式块直接取 data-content。
+ * 局部选区**绝不 trim**（`A  \(x\)  B` 只选中 ` \(x\) ` 时首尾空格必须保留），
+ * 完整块按块语义 trim。
  */
-export function extractSourceMarkdown(range: Range, block: HTMLElement | null): string {
+export function extractSourceMarkdown(
+    range: Range,
+    block: HTMLElement | null,
+    kind: ManualActionKind,
+): string {
     if (block?.getAttribute("data-type") === "NodeMathBlock") {
         return "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
     }
@@ -250,7 +301,8 @@ export function extractSourceMarkdown(range: Range, block: HTMLElement | null): 
         t.textContent = "$$\n" + (m as HTMLElement).getAttribute("data-content") + "\n$$";
         m.replaceWith(t);
     });
-    return (container.textContent || "").trim();
+    const text = container.textContent || "";
+    return kind === "local-inline" ? text : text.trim();
 }
 
 /**
@@ -297,8 +349,8 @@ export async function runManualAction(
         return "blockRichRefuse";
     }
 
-    const source = extractSourceMarkdown(ctx.range, ctx.block);
-    if (!source) {
+    const source = extractSourceMarkdown(ctx.range, ctx.block, kind);
+    if (!source.trim()) {
         return "noSelection";
     }
     const out = action === "fix" ? fixText(source) : convertToPlain(source);

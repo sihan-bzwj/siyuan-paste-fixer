@@ -252,6 +252,70 @@ async function main() {
         document.body.innerHTML = "";
     }
 
+    console.log("== 11. 块首/块尾公式：只选正文不判 whole-block（公式不被覆盖） ==");
+    {
+        const editor = mkEditor();
+        const blockA = mkBlock(editor, "bA", '<span data-type="inline-math" data-subtype="math" data-content="x"></span> 后文');
+        const rangeA = document.createRange();
+        rangeA.setStart(blockA.lastChild, 0);
+        rangeA.setEnd(blockA.lastChild, 2); // 只选“后文”二字
+        let updateCalls = 0;
+        global.fetch = async () => { updateCalls++; return {ok: true, json: async () => ({code: 0})}; };
+        const ctxA = M.captureManualContext(rangeA, null);
+        const keyA = await M.runManualAction(ctxA, "fix", fixLatexText, convertToPlain);
+        assert(keyA !== "blockRichRefuse" && keyA !== undefined, "块首有公式时选正文不触发整块路径", keyA);
+        assert(updateCalls === 0, "未走 updateBlock（公式仍在前方）", String(updateCalls));
+        assert(blockA.querySelector('[data-type="inline-math"]') !== null, "块首公式保留", domeHtml(blockA));
+
+        const blockB = mkBlock(editor, "bB", '前文 <span data-type="inline-math" data-subtype="math" data-content="y"></span>');
+        const rangeB = document.createRange();
+        rangeB.setStart(blockB.firstChild, 0);
+        rangeB.setEnd(blockB.firstChild, 2); // 只选“前文”二字
+        updateCalls = 0;
+        const ctxB = M.captureManualContext(rangeB, null);
+        await M.runManualAction(ctxB, "fix", fixLatexText, convertToPlain);
+        assert(updateCalls === 0, "块尾公式时也未走 updateBlock", String(updateCalls));
+        assert(blockB.querySelector('[data-type="inline-math"]') !== null, "块尾公式保留", domeHtml(blockB));
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 12. 局部选区空格保留（不再 trim） ==");
+    {
+        const editor = mkEditor();
+        const block = mkBlock(editor, "bC", "A \\(x\\) B");
+        // 只选 " \\(x\\) "（含两侧空格，偏移 1..8）
+        const range = document.createRange();
+        range.setStart(block.firstChild, 1);
+        range.setEnd(block.firstChild, 8);
+        const ctx = M.captureManualContext(range, null);
+        await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        const span = block.querySelector('[data-type="inline-math"]');
+        const joined = Array.from(block.childNodes)
+            .filter((n) => n.nodeType === 3 && n.textContent)
+            .map((n) => n.textContent)
+            .join("");
+        assert(span !== null && span.getAttribute("data-content") === "x", "公式 x 正确转换", domeHtml(block));
+        assert(joined === "A  B", "选中区内侧空格保留（两侧各一个空格仍存在）", JSON.stringify(joined));
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 13. 未识别富格式元素（fail-closed 白名单） ==");
+    {
+        let updateCalls = 0;
+        global.fetch = async () => { updateCalls++; return {ok: true, json: async () => ({code: 0})}; };
+        const editor = mkEditor();
+        const block = mkBlock(editor, "bD", '文本 <kbd>Ctrl</kbd> 公式 \\(x\\)');
+        const range = document.createRange();
+        range.setStart(block.firstChild, 0);
+        range.setEnd(block.lastChild, block.lastChild.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "blockRichRefuse", "kbd 等未知语义元素 → 整块拒绝", key);
+        assert(updateCalls === 0, "未触发 updateBlock");
+        assert(domeHtml(block).includes("<kbd>"), "DOM 原样未动");
+        document.body.innerHTML = "";
+    }
+
     console.log(`\n手动转换测试: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }

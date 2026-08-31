@@ -75,10 +75,16 @@ async function main() {
         document.body.innerHTML = "";
     }
 
-    console.log("== 2. 快照时效：窗口期内可用，过期忽略 ==");
+    console.log("== 2. 快照时效与指纹：窗口期内且文本一致才可用 ==");
     {
-        const snap = {time: Date.now() - 100, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "", textHTML: ""};
-        assert(consumePasteContext(snap, Date.now()) === snap, "100ms 前快照可用");
+        const snap = {time: Date.now() - 50, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "AAA", textHTML: ""};
+        assert(consumePasteContext(snap, Date.now()) === snap, "50ms 前快照可用");
+        assert(consumePasteContext(snap, Date.now(), {textPlain: "AAA"}) === snap, "textPlain 指纹一致可用");
+        assert(consumePasteContext(snap, Date.now(), {textPlain: "BBB"}) === null, "textPlain 指纹不一致忽略（不吃旧 context）");
+        const snapHtml = {time: Date.now() - 50, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "AAA", textHTML: "AAA"};
+        assert(consumePasteContext(snapHtml, Date.now(), {textHTML: "BBB"}) === null, "textHTML 指纹不一致忽略");
+        const emptyPlain = {...snap, textPlain: ""};
+        assert(consumePasteContext(emptyPlain, Date.now(), {textPlain: "BBB"}) === emptyPlain, "快照侧为空文本时不做指纹比较（仍可用）");
         const old = {time: Date.now() - PASTE_CONTEXT_WINDOW_MS - 100, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "", textHTML: ""};
         assert(consumePasteContext(old, Date.now()) === null, "超过观察窗的快照忽略");
         assert(consumePasteContext(null, Date.now()) === null, "无快照返回 null");

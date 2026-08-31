@@ -9,99 +9,18 @@ import {selectClipboardMarkdown} from "./clipboard";
 import {
     countMathFormulas,
     DEFAULT_POLICY,
-    detectPasteScenario,
     PasteScenario,
     planPasteHandling,
     ScenarioPolicy,
 } from "./scenario";
 import {hasMathML} from "./mathml";
-import {captureManualContext, runManualAction} from "./manual-action";
+import {captureManualContext, deriveProtyleElement, ManualContext, runManualAction} from "./manual-action";
 import {createMenuHandlers, MenuHandlers} from "./context-menu";
 import {createSettingsPanel, loadSettingsFromFile, PasteFixerSettings, saveSettingsToFile} from "./settings";
 import {capturePasteContext, consumePasteContext, PasteContextSnapshot} from "./paste-context";
+import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
 
 type PasteDetail = IEventBusMap["paste"];
-
-/** Lute 实例的最小接口 */
-interface ILiteLute {
-    Md2BlockDOM: (s: string) => string;
-    NewNodeID: () => string;
-    SetInlineMath: (b: boolean) => void;
-    SetInlineAsterisk: (b: boolean) => void;
-    SetGFMStrikethrough: (b: boolean) => void;
-    SetSub: (b: boolean) => void;
-    SetSup: (b: boolean) => void;
-    SetTag: (b: boolean) => void;
-    SetInlineUnderscore: (b: boolean) => void;
-}
-
-/** 自建全局 Lute 实例（window.Lute.New()），与编辑器共享的语法开关保持一致 */
-let cachedLute: ILiteLute | null = null;
-function getLute(): ILiteLute | null {
-    if (cachedLute) {
-        return cachedLute;
-    }
-    try {
-        const L = (window as unknown as {Lute?: {New: () => ILiteLute, NewNodeID: () => string}}).Lute;
-        if (!L || typeof L.New !== "function") {
-            return null;
-        }
-        const inst = L.New();
-        inst.SetInlineMath(true);
-        inst.SetInlineAsterisk(true);
-        inst.SetGFMStrikethrough(true);
-        inst.SetSub(true);
-        inst.SetSup(true);
-        inst.SetTag(true);
-        inst.SetInlineUnderscore(true);
-        cachedLute = inst;
-    } catch (e) {
-        return null;
-    }
-    return cachedLute;
-}
-
-/**
- * 把修复后的 Markdown 转成思源内部块 DOM。
- * 思源前端 Lute 只解析行内数学（$$ 块会被降级成行内公式），
- * 因此 $$ 块在这里手工生成真公式块 DOM，其余内容交给 Lute 的 Md2BlockDOM。
- * 代码/链接/URL 等保护段先遮蔽成占位符：整段 Markdown 一次性交给 Lute 渲染
- * （拆段渲染会切断行内结构），还原只发生在 Lute 输出的纯文本片段上；
- * Lute 会把链接/行内代码渲染成 span，占位符落在 span 的纯文本里。
- */
-function mdToSiyuanHTML(md: string, lute: ILiteLute): string {
-    const protectedMask = maskProtectedSegments(md);
-    // 代码/链接先遮蔽，再检查剩余 Markdown 中的孤立美元。两层恢复顺序与
-    // 遮蔽顺序相反：先把美元恢复为普通 DOM 文本，再还原保护段原文。
-    const dollarMask = maskLuteUnsafeDollars(protectedMask.masked);
-    const masked = dollarMask.masked;
-    const restore = (html: string): string =>
-        protectedMask.restore(dollarMask.restore(html));
-    const out: string[] = [];
-    const newId = (): string => {
-        // 优先用 Lute 实例的 NewNodeID，全局 Lute 类作为兜底
-        if (typeof lute.NewNodeID === "function") {
-            return lute.NewNodeID();
-        }
-        const globalLute = (window as unknown as {Lute?: {NewNodeID: () => string}}).Lute;
-        return globalLute?.NewNodeID() ?? `${Date.now()}-pastefix`;
-    };
-    const parts = masked.split(/(\$\$[\s\S]+?\$\$)/g);
-    for (const part of parts) {
-        if (!part.trim()) {
-            continue;
-        }
-        if (part.startsWith("$$") && part.endsWith("$$") && !part.includes("\u0001")) {
-            const latex = part.slice(2, -2).trim();
-            const attr = latex.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-            out.push(`<div data-node-id="${newId()}" data-type="NodeMathBlock" class="render-node"` +
-                ` data-content="${attr}" data-subtype="math"><div spin="1"></div></div>`);
-        } else {
-            out.push(restore(lute.Md2BlockDOM(part)));
-        }
-    }
-    return out.join("");
-}
 
 /** 把标准公式形态还原为纯文本（右键"还原为纯文本"）：$$/$ 去定界符、包装花括号还原。 */
 function convertMathToPlainText(text: string): string {
@@ -118,19 +37,40 @@ function convertMathToPlainText(text: string): string {
  * 1. 原生 paste 事件只做只读上下文快照（代码块目标/编辑器/文件/文本），
  *    不拦截、不修改剪贴板、不重派发——图片/附件粘贴不会被吞；
  * 2. 官方事件总线 paste 事件是唯一转换入口，消费快照中的目标上下文，
- *    issue #1 的代码块目标信息从此贯通两条路径。
+ *    issue #1 的代码块目标信息从此贯通两条路径；快照带时效与文本指纹校验；
+ * 3. 剪贴板携带文件时插件整体放行（不改 payload，安全优先）。
  */
 export default class PasteFixer extends Plugin {
     /** 运行设置（settings.ts 持久化；不依赖 SDK 基类的 this.data 加载机制） */
     private settings: PasteFixerSettings = {};
-    /** 右键菜单双路径管理器（context-menu.ts） */
+    /** 右键菜单三路径管理器（context-menu.ts） */
     private menuHandlers: MenuHandlers | null = null;
     /** 顶栏按钮元素（addTopBar 返回，避免按 id 猜 DOM） */
     private topBarElement: HTMLElement | null = null;
     /** 最近一次原生 paste 的上下文快照（短暂有效，消费后清空） */
     private pasteSnapshot: PasteContextSnapshot | null = null;
+    /** 最近一次编辑器内选区（顶栏/命令菜单打开后 selection 可能被拿走，用快照兜底） */
+    private lastEditorRange: Range | null = null;
+    /** 顶栏菜单打开瞬间的选区快照（点击菜单项时不再读可能已失效的 selection） */
+    private quickMenuContext: ManualContext | null = null;
     /** 插件已卸载：异步 bootstrap 中途卸载时不再注册任何监听器 */
     private disposed = false;
+
+    /** 编辑器内选区变更：记录最近有效 range（供顶栏/命令使用） */
+    private onSelectionChange = (): void => {
+        try {
+            const sel = getSelection();
+            if (!sel || sel.rangeCount === 0) {
+                return;
+            }
+            const range = sel.getRangeAt(0);
+            if (range.startContainer && deriveProtyleElement(range)) {
+                this.lastEditorRange = range.cloneRange();
+            }
+        } catch (e) {
+            /* 选区记录失败不影响其它功能 */
+        }
+    };
 
     /** 事件总线 paste：唯一转换入口 */
     private onPaste = (event: CustomEvent<PasteDetail>) => {
@@ -142,9 +82,16 @@ export default class PasteFixer extends Plugin {
             const siyuanHTML = detail.siyuanHTML || "";
             const files = detail.files;
 
-            // 消费原生 paste 快照（代码块目标信息事件总线无法自行感知）
-            const snap = consumePasteContext(this.pasteSnapshot, Date.now());
+            // 消费原生 paste 快照（代码块目标信息事件总线无法自行感知；带指纹校验）
+            const snap = consumePasteContext(this.pasteSnapshot, Date.now(), {textPlain, textHTML});
             this.pasteSnapshot = null;
+
+            // 携带文件：插件整体放行，不参与任何修复
+            const hasFiles = !!snap?.hasFiles || (!!files && files.length > 0);
+            if (hasFiles) {
+                resolve(detail);
+                return;
+            }
 
             const plan = planPasteHandling({
                 textPlain,
@@ -178,12 +125,9 @@ export default class PasteFixer extends Plugin {
                         // 生成失败走纯文本
                     }
                     if (sy) {
-                        const hasFiles = !!files && files.length > 0;
-                        if (!hasFiles) {
-                            this.maybeHint(scenario, countMathFormulas(plain));
-                            resolve({textHTML: "", textPlain: plain, siyuanHTML: sy, files});
-                            return;
-                        }
+                        this.maybeHint(scenario, countMathFormulas(plain));
+                        resolve({textHTML: "", textPlain: plain, siyuanHTML: sy, files});
+                        return;
                     }
                 }
             }
@@ -194,31 +138,28 @@ export default class PasteFixer extends Plugin {
                 return;
             }
 
-            const hasFiles = !!files && files.length > 0;
             const richHTML = /<(h[1-6]|li|ul|ol|table|img|pre|blockquote|strong|b|i|em|a)[\s>]/i.test(textHTML);
             // 修复后的 Markdown 若仍含孤立/非公式美元，不能直接交给思源重新
             // 配对；必须先走 mdToSiyuanHTML，让占位符把它固定成普通文本。
             const protectedForCheck = maskProtectedSegments(fixed);
             const needsDollarShield = maskLuteUnsafeDollars(protectedForCheck.masked).count > 0;
-            if (!hasFiles && (!richHTML || hasMathML(textHTML)) && !needsDollarShield) {
+            if ((!richHTML || hasMathML(textHTML)) && !needsDollarShield) {
                 this.maybeHint(scenario, countMathFormulas(fixed));
                 resolve({textHTML: "", textPlain: fixed, siyuanHTML: "", files});
                 return;
             }
             // 富文本但无 MathML：修复后的 Markdown 交给内核转 DOM（牺牲富格式，保住公式修复）
-            if (!hasFiles) {
-                const lute = getLute();
-                if (lute) {
-                    try {
-                        const sy = mdToSiyuanHTML(fixed, lute);
-                        if (sy) {
-                            this.maybeHint(scenario, countMathFormulas(fixed));
-                            resolve({textHTML: "", textPlain: fixed, siyuanHTML: sy, files});
-                            return;
-                        }
-                    } catch (e) {
-                        console.error("[paste-fixer] 富文本转换失败，按原样粘贴", e);
+            const lute = getLute();
+            if (lute) {
+                try {
+                    const sy = mdToSiyuanHTML(fixed, lute);
+                    if (sy) {
+                        this.maybeHint(scenario, countMathFormulas(fixed));
+                        resolve({textHTML: "", textPlain: fixed, siyuanHTML: sy, files});
+                        return;
                     }
+                } catch (e) {
+                    console.error("[paste-fixer] 富文本转换失败，按原样粘贴", e);
                 }
             }
         } catch (e) {
@@ -292,6 +233,8 @@ export default class PasteFixer extends Plugin {
     /** 顶栏按钮弹出开关菜单（仿 text-process）：每个开关都真实改变行为。 */
     private showQuickMenu(): void {
         try {
+            // 打开瞬间捕获选区快照：菜单点击时 selection 可能已被拿走
+            this.quickMenuContext = this.currentEditorContext();
             let btn: HTMLElement | null = this.topBarElement;
             const b = btn && btn.getBoundingClientRect();
             if (!btn || (b && b.width === 0)) {
@@ -338,12 +281,12 @@ export default class PasteFixer extends Plugin {
             menu.addItem({
                 icon: "iconMath",
                 label: this.i18n.menuConvert,
-                click: () => void this.runSelectionAction("fix"),
+                click: () => void this.runSelectionAction("fix", this.quickMenuContext),
             });
             menu.addItem({
                 icon: "iconMath",
                 label: this.i18n.menuRevert,
-                click: () => void this.runSelectionAction("revert"),
+                click: () => void this.runSelectionAction("revert", this.quickMenuContext),
             });
             if (rect) {
                 menu.open({x: Math.round(rect.right - 240), y: Math.round(rect.bottom + 8)});
@@ -353,16 +296,34 @@ export default class PasteFixer extends Plugin {
         }
     }
 
-    /** 统一手动动作入口（命令/顶栏兜底用，右键走 context-menu 的 range 快照） */
-    private async runSelectionAction(action: "fix" | "revert"): Promise<void> {
-        const sel = getSelection();
-        if (!sel || sel.rangeCount === 0) {
+    /** 当前编辑器内上下文：优先实时选区，其次最近一次编辑器内选区快照。 */
+    private currentEditorContext(): ManualContext | null {
+        try {
+            const sel = getSelection();
+            if (sel && sel.rangeCount > 0) {
+                const range = sel.getRangeAt(0);
+                if (range.startContainer && deriveProtyleElement(range)) {
+                    return captureManualContext(range, null);
+                }
+            }
+            if (this.lastEditorRange) {
+                return captureManualContext(this.lastEditorRange, null);
+            }
+        } catch (e) {
+            /* 取不到上下文时返回 null */
+        }
+        return null;
+    }
+
+    /** 统一手动动作入口（右键走 context-menu 的 range 快照；顶栏/命令用选区快照） */
+    private async runSelectionAction(action: "fix" | "revert", ctx: ManualContext | null = null): Promise<void> {
+        const resolved = ctx ?? this.currentEditorContext();
+        if (!resolved) {
             showMessage(this.i18n.noSelection, 3000);
             return;
         }
-        const ctx = captureManualContext(sel.getRangeAt(0), null);
         try {
-            const key = await runManualAction(ctx, action, fixLatexText, convertMathToPlainText);
+            const key = await runManualAction(resolved, action, fixLatexText, convertMathToPlainText);
             showMessage(this.i18n[key] || key, 3000);
         } catch (e) {
             const err = e instanceof Error ? e.message : String(e);
@@ -400,18 +361,22 @@ export default class PasteFixer extends Plugin {
         });
         this.menuHandlers = menuHandlers;
 
-        // 通道 1：事件总线（唯一转换入口）
+        // 通道 1：事件总线（唯一转换入口）+ 菜单官方通路/单例弹出事件
         this.eventBus.on("paste", this.onPaste);
         this.eventBus.on("open-menu-content", menuHandlers.onOpenMenuContent as never);
+        // 思源 v3.8.2 的菜单单例弹出事件（SDK 1.2.4 类型未收录，运行时存在）
+        this.eventBus.on("common-menu-open" as keyof IEventBusMap, menuHandlers.onCommonMenuOpen as never);
         // 通道 2：原生 paste 只捕获上下文（捕获阶段，编辑器内才记录）
         document.addEventListener("paste", this.onDomPaste as EventListener, true);
-        // 通道 3：右键菜单兜底（观察窗注入，事件通路到时自动取消）
+        // 通道 3：右键菜单兜底（common-menu-open 事件优先级高于 DOM 观察）
         document.addEventListener("contextmenu", menuHandlers.onContextMenu as EventListener, true);
+        // 选区快照：顶栏/命令菜单打开后 selection 可能失效，用最近编辑器内选区兜底
+        document.addEventListener("selectionchange", this.onSelectionChange);
         // 其余 UI 注册放最后，失败也不影响粘贴修复
         try {
             this.addCommand({
                 langKey: "convertSelection",
-                callback: () => void this.runSelectionAction("fix"),
+                callback: () => void this.runSelectionAction("fix", this.currentEditorContext()),
             });
         } catch (e) {
             console.error("[paste-fixer] 命令注册失败", e);
@@ -432,6 +397,7 @@ export default class PasteFixer extends Plugin {
     onunload() {
         this.disposed = true;
         document.removeEventListener("paste", this.onDomPaste as EventListener, true);
+        document.removeEventListener("selectionchange", this.onSelectionChange);
         if (this.menuHandlers) {
             document.removeEventListener("contextmenu", this.menuHandlers.onContextMenu as EventListener, true);
             this.menuHandlers.dispose();
@@ -439,6 +405,7 @@ export default class PasteFixer extends Plugin {
         this.eventBus.off("paste", this.onPaste);
         if (this.menuHandlers) {
             this.eventBus.off("open-menu-content", this.menuHandlers.onOpenMenuContent as never);
+            this.eventBus.off("common-menu-open" as keyof IEventBusMap, this.menuHandlers.onCommonMenuOpen as never);
         }
     }
 }

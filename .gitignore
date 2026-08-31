@@ -1,12 +1,8 @@
 node_modules/
 dist/
 package.zip
-test/_fix-latex.cjs
 test/_demo-doc.md
 test/fixtures/*-fixed.txt
-test/_mathml.cjs
-test/_clipboard.cjs
-test/_scenario.cjs
 test/_fix-latex.cjs
 test/_mathml.cjs
 test/_clipboard.cjs
@@ -16,3 +12,4 @@ test/_context-menu.cjs
 test/_settings.cjs
 test/_siyuan-stub.cjs
 test/_paste-context.cjs
+test/_siyuan-dom.cjs

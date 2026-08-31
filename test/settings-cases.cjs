@@ -103,8 +103,9 @@ async function main() {
                 if (putCalls.length === 1) {
                     await gate; // 第一次写入挂起，验证第二次不会并发开始
                 }
+                return {ok: true, json: async () => ({code: 0})};
             }
-            return {ok: true};
+            return {ok: true, json: async () => ({code: 0})};
         };
         const p1 = S.saveSettingsToFile({aiPolicy: "fix"});
         const p2 = S.saveSettingsToFile({aiPolicy: "pass"});
@@ -115,6 +116,39 @@ async function main() {
         assert(putCalls.length === 2, "两次都完成", String(putCalls.length));
         assert(putCalls[1].payload === JSON.stringify({aiPolicy: "pass"}), "最后落盘的是最后一次的值", putCalls[1].payload);
         assert(putCalls[0].path === "/data/storage/petal/paste-fixer/data.json", "路径符合 petal 约定", putCalls[0].path);
+    }
+
+    console.log("== 3b. 保存失败检查：HTTP 错误 / 内核 code != 0 → warn ==");
+    {
+        const warns = [];
+        const origWarn = console.warn;
+        console.warn = (...args) => warns.push(args.join(" "));
+        global.fetch = async (url) => {
+            if (String(url).includes("putFile")) {
+                return {ok: false, status: 500};
+            }
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        await S.saveSettingsToFile({aiPolicy: "fix"});
+        assert(warns.length === 1 && warns[0].includes("http 500"), "HTTP 失败 → warn", warns.join("|"));
+        global.fetch = async (url) => {
+            if (String(url).includes("putFile")) {
+                return {ok: true, json: async () => ({code: 1, msg: "kernel error"})};
+            }
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        await S.saveSettingsToFile({aiPolicy: "pass"});
+        assert(warns.length === 2 && warns[1].includes("kernel error"), "内核 code!=0 → warn", warns.join("|"));
+        // 成功后不再 warn
+        global.fetch = async (url) => {
+            if (String(url).includes("putFile")) {
+                return {ok: true, json: async () => ({code: 0})};
+            }
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        await S.saveSettingsToFile({mixedPolicy: "smart"});
+        assert(warns.length === 2, "成功路径不 warn", String(warns.length));
+        console.warn = origWarn;
     }
 
     console.log("== 4. 策略下拉：创建时动态读取当前设置 ==");

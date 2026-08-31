@@ -72,13 +72,24 @@ async function putFile(payload: string): Promise<void> {
     fd.append("file", blob, "data.json");
     fd.append("path", SETTINGS_PATH);
     fd.append("isDir", "false");
-    await fetch("/api/file/putFile", {method: "POST", body: fd});
+    const r = await fetch("/api/file/putFile", {method: "POST", body: fd});
+    if (!r.ok) {
+        throw new Error("putFile http " + r.status);
+    }
+    const j = await r.json() as {code?: number, msg?: string};
+    if (j.code !== 0) {
+        throw new Error(j.msg || "putFile code " + j.code);
+    }
 }
 
-/** 写入 petal 文件（putFile 为 multipart 接口；失败不影响本次会话行为）。 */
+/** 写入 petal 文件；失败 console.warn（不打扰用户），且不阻断后续保存。 */
 export function saveSettingsToFile(settings: PasteFixerSettings): Promise<void> {
     const payload = JSON.stringify(settings);
-    saveChain = saveChain.then(() => putFile(payload)).catch(() => { /* 单次失败不阻断后续 */ });
+    saveChain = saveChain
+        .then(() => putFile(payload))
+        .catch((e) => {
+            console.warn("[paste-fixer] 设置保存失败", e instanceof Error ? e.message : e);
+        });
     return saveChain;
 }
 

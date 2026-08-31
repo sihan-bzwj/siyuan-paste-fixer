@@ -21,7 +21,7 @@ export interface PasteContextSnapshot {
     textHTML: string;
 }
 
-export const PASTE_CONTEXT_WINDOW_MS = 2000;
+export const PASTE_CONTEXT_WINDOW_MS = 500;
 
 /** 捕获原生 paste 上下文；不在正文编辑器内或没有剪贴板数据时返回 null。 */
 export function capturePasteContext(
@@ -51,16 +51,29 @@ export function capturePasteContext(
     };
 }
 
-/** 时效校验：快照在窗口期内才视为本次粘贴的上下文，过期返回 null。 */
+/**
+ * 时效与指纹校验：快照在窗口期内**且**文本指纹一致才视为本次粘贴的上下文。
+ * 若上一次快照未被消费、2 秒（窗口）内又发生另一次粘贴，指纹不匹配的快照
+ * 会被忽略，避免吃到旧 context。
+ */
 export function consumePasteContext(
     snapshot: PasteContextSnapshot | null,
     now: number,
+    expected?: {textPlain?: string, textHTML?: string},
 ): PasteContextSnapshot | null {
     if (!snapshot) {
         return null;
     }
     if (now - snapshot.time > PASTE_CONTEXT_WINDOW_MS) {
         return null;
+    }
+    if (expected) {
+        if (expected.textPlain && snapshot.textPlain && expected.textPlain !== snapshot.textPlain) {
+            return null;
+        }
+        if (expected.textHTML && snapshot.textHTML && expected.textHTML !== snapshot.textHTML) {
+            return null;
+        }
     }
     return snapshot;
 }
