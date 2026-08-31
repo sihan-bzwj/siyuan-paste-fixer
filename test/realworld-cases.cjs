@@ -5,6 +5,7 @@
  * 运行：node test/realworld-cases.cjs
  */
 const path = require("path");
+const fs = require("fs");
 const esbuild = require("esbuild");
 const katex = require("katex");
 
@@ -96,7 +97,9 @@ async function main() {
     console.log("== 5. QQ 粘贴 $^$^ 序列（思源 issue #8289） ==");
     const qq = "Indeed, if $a^r=a^s$ with $0 \\leqq r, s \\leqq d-1$, and say $r \\leqq s$, then $a^{s-r}=$ $e$. Since $0 \\leqq s-r<d$ we must have $s-r=0$.";
     out = fixLatexText(qq);
-    unchanged(out, qq, "$^$ 相邻序列不损坏");
+    // 数字打头的行内公式需包花括号（Lute 拒绝 $0... 形态），其余逐字不变
+    assert(out === "Indeed, if $a^r=a^s$ with ${0 \\leqq r, s \\leqq d-1}$, and say $r \\leqq s$, then $a^{s-r}=$ $e$. Since ${0 \\leqq s-r<d}$ we must have $s-r=0$.",
+        "$^$ 相邻序列不损坏（数字打头公式包装）", out);
     assert(!out.includes("$$$"), "$ $ 空内容不收拢成 $$", out);
     katexOK(out, "QQ 数学段落");
 
@@ -145,6 +148,30 @@ async function main() {
     out = fixLatexText("$A$$A_{i,i}$$I$$n$$n$");
     assert(!out.includes("\u0001"), "无占位符泄漏", out);
     assert(out === "$A$$A_{i,i}$$I$$n$$n$", "相邻公式不互相吞并", out);
+
+    console.log("== 15. 递推式完整解题文本（用户实测：Lute 拒数字打头行内公式） ==");
+    const boxed = fs.readFileSync(path.join(__dirname, "fixtures/boxed-recursion-plain.txt"), "utf8");
+    out = fixLatexText(boxed);
+    // 数字打头行内公式要包花括号（Lute 拒绝 $0<x\le1$ 形态），否则会重配对吞内容
+    assert((out.match(/\$\{0<x\\le1\}\$/g) || []).length === 2, "两处 $0<x\\le1$ 均包装为 Lute 可解析形态", out);
+    assert(!out.includes("$0<x\\le1$"), "原始数字打头形态不残留", out);
+    const nonBlock = out.replace(/\$\$[\s\S]+?\$\$/g, "");
+    const inlineBodies = [...nonBlock.matchAll(/\$([^$\n]+?)\$/g)].map((m) => m[1]);
+    assert(inlineBodies.length === 11 && inlineBodies.every((b) => !/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(b)),
+        "行内公式内容不含中文（无吞并）", inlineBodies);
+    katexOK(out, "递推式完整文本（20 块 + 11 行内）");
+
+    console.log("== 16. Lute 数字打头规则回归（前端实测规则） ==");
+    assert(fixLatexText("A $2x$ B") === "A ${2x}$ B", "$2x 包装", fixLatexText("A $2x$ B"));
+    assert(fixLatexText("$4^n$ 增长") === "${4^n}$ 增长", "$4^n 包装");
+    assert(fixLatexText("值 $3.14$ 记录") === "值 ${3.14}$ 记录", "$3.14 包装");
+    assert(fixLatexText("$2\\cos x$ 周期") === "${2\\cos x}$ 周期", "$2\\cos 包装");
+    assert(fixLatexText("价格 $5 and $10") === "价格 $5 and $10", "金额不包装");
+    assert(fixLatexText("价格 $ 5 和 $ 10 元") === "价格 $ 5 和 $ 10 元", "空格金额不包装");
+    assert(fixLatexText("因为 $y_0\\ge2$，所以") === "因为 $y_0\\ge2$，所以", "字母打头不包装");
+    assert(fixLatexText("$x_i$ 点") === "$x_i$ 点", "下标记号不包装");
+    assert(fixLatexText("$\\frac12$") === "$\\frac12$", "命令开头不包装");
+    assert(fixLatexText("A $(x)$ B") === "A $(x)$ B", "括号开头不包装");
 
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);

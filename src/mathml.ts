@@ -99,6 +99,7 @@ function htmlToText(root: Node): string {
     };
     walk(root);
     return parts.join("")
+        .replace(/[\u200b-\u200d\ufeff\u2060]/g, "") // 网页 DOM 常见的零宽字符/BOM 残留
         .replace(/[ \t]+\n/g, "\n")
         .replace(/\n{3,}/g, "\n\n")
         .replace(/[ \t]{2,}/g, " ")

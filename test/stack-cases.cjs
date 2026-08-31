@@ -68,7 +68,7 @@ const screenshotFixed = fixLatexText(screenshotSrc);
 const screenshotProtected = maskProtectedSegments(screenshotFixed);
 const screenshotDollar = maskLuteUnsafeDollars(screenshotProtected.masked);
 t("截图句型只遮蔽末尾未闭合美元", screenshotDollar.count === 1, screenshotDollar.masked);
-t("截图句型的两个完整公式仍交给 Lute", screenshotDollar.masked.includes("$a_n \\to 2$") && screenshotDollar.masked.includes("$4^n(2-a_n)$"), screenshotDollar.masked);
+t("截图句型的两个完整公式仍交给 Lute", screenshotDollar.masked.includes("$a_n \\to 2$") && screenshotDollar.masked.includes("${4^n(2-a_n)}$"), screenshotDollar.masked);
 t("截图句型未闭合 $2 不再参与 Lute 配对", !screenshotDollar.masked.includes("[$2\\cos"), screenshotDollar.masked);
 t("美元遮蔽-恢复后用户可见文本逐字不变", screenshotDollar.restore(screenshotDollar.masked) === screenshotFixed, screenshotDollar.masked);
 const amountAndMath = maskLuteUnsafeDollars("费用 $ 100 与公式 $ x $");

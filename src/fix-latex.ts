@@ -351,7 +351,7 @@ function convertBareEnvironments(
         const inner = text.slice(match.index + beginToken.length, end - endToken.length).trim();
         let replacement: string;
         if (INLINE_ENVIRONMENTS.has(env)) {
-            replacement = `$${fixInlineMath(inner)}$`;
+            replacement = `$${luteSafeInline(fixInlineMath(inner))}$`;
         } else if (STRIP_DISPLAY_ENVIRONMENTS.has(env)) {
             replacement = `$$\n${fixInsideMath(inner)}\n$$`;
         } else {
@@ -460,6 +460,16 @@ function isInsideUrl(text: string, index: number): boolean {
     return false;
 }
 
+/**
+ * Lute 行内数学拒绝"开头 $ 后紧跟数字"（实测：$0<x\le1$、$2x$、$4^n$、$3.14$
+ * 全部按纯文本处理）。数字打头的内容包一层花括号即可通过解析，
+ * KaTeX 渲染 `{...}` 与原文完全等价。仅对"可靠像数学"的内容包装，
+ * 金额（$5 and $、$100 元）不受影响。
+ */
+function luteSafeInline(content: string): string {
+    return /^\d/.test(content) && isReliableDollarPair(content) ? `{${content}}` : content;
+}
+
 /** 单段（无代码围栏）修复 */
 function fixTextSegment(seg: string): string {
     let s = seg;
@@ -485,7 +495,7 @@ function fixTextSegment(seg: string): string {
                 INLINE_DOLLAR_RE.lastIndex = pos;
                 continue;
             }
-            outText += s.slice(pos, inlineMatch.index) + hold("$" + fixedInner + "$");
+            outText += s.slice(pos, inlineMatch.index) + hold("$" + luteSafeInline(fixedInner) + "$");
             pos = inlineMatch.index + inlineMatch[0].length;
         }
         s = outText + s.slice(pos);
@@ -500,7 +510,7 @@ function fixTextSegment(seg: string): string {
         }
         const t = inner.trim();
         // 跨行的 \( ... \) 按块级处理（与 \[ \] 对齐）
-        return hold(t.includes("\n") ? "$$\n" + fixInsideMath(t) + "\n$$" : "$" + fixInlineMath(t) + "$");
+        return hold(t.includes("\n") ? "$$\n" + fixInsideMath(t) + "\n$$" : "$" + luteSafeInline(fixInlineMath(t)) + "$");
     });
     // 3. 完整裸环境 → 行内或块级公式。
     s = convertBareEnvironments(s, hold, contains);

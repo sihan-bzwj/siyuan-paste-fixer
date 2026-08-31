@@ -1,0 +1,131 @@
+这题的关键是把递推式
+
+$$
+y_n=y_{n-1}^2-2
+$$
+
+识别成一个很适合"平方"的形式。
+
+令
+
+$$
+\boxed{x=\frac{y_0-\sqrt{y_0^2-4}}2}.
+$$
+
+因为 $y_0\ge2$，所以 $0<x\le1$。而 $x$ 是方程
+
+$$
+t^2-y_0t+1=0
+$$
+
+的一个根，因此
+
+$$
+\boxed{y_0=x+\frac1x}.
+$$
+
+1. 先求出 $y_n$ 的结构
+
+有
+
+$$
+y_1=y_0^2-2 =\left(x+\frac1x\right)^2-2 =x^2+\frac1{x^2}.
+$$
+
+继续递推：
+
+$$
+y_2=y_1^2-2=x^4+\frac1{x^4}.
+$$
+
+所以归纳得到
+
+$$
+\boxed{y_n=x^{2^n}+x^{-2^n}}.
+$$
+
+2. 把 $S_n$ 的每一项拆成“前后相减”
+
+记
+
+$$
+P_k=y_0y_1\cdots y_k,\qquad P_{-1}=1.
+$$
+
+那么 $S_n$ 可以写成
+
+$$
+S_n=\sum_{k=0}^n\frac1{P_k}.
+$$
+
+利用
+
+$$
+y_k=x^{2^k}+x^{-2^k},
+$$
+
+我们有
+
+$$
+\begin{aligned} \frac{x^{2^k}}{P_{k-1}} -\frac{x^{2^{k+1}}}{P_k} &= \frac{x^{2^k}y_k-x^{2^{k+1}}}{P_k}\\ &=\frac{ x^{2^k}\left(x^{2^k}+x^{-2^k}\right) -x^{2^{k+1}} }{P_k}\\ &=\frac{1}{P_k}. \end{aligned}
+$$
+
+因此
+
+$$
+\boxed{ \frac1{P_k} = \frac{x^{2^k}}{P_{k-1}} -\frac{x^{2^{k+1}}}{P_k} }.
+$$
+
+这就变成了裂项相消。
+
+于是
+
+$$
+\begin{aligned} S_n &=\sum_{k=0}^n \left( \frac{x^{2^k}}{P_{k-1}} -\frac{x^{2^{k+1}}}{P_k} \right)\\ &=x-\frac{x^{2^{n+1}}}{P_n}. \end{aligned}
+$$
+
+即
+
+$$
+\boxed{ S_n=x-\frac{x^{2^{n+1}}}{y_0y_1\cdots y_n} }.
+$$
+
+3. 求极限
+
+因为 $y_0\ge2$，并且
+
+$$
+y_n=y_{n-1}^2-2\ge2,
+$$
+
+所以所有 $y_k\ge2$，从而
+
+$$
+P_n=y_0y_1\cdots y_n\ge2^{n+1}.
+$$
+
+又因为 $0<x\le1$，所以
+
+$$
+0\le \frac{x^{2^{n+1}}}{P_n} \le\frac1{2^{n+1}} \to0.
+$$
+
+因此
+
+$$
+\lim_{n\to\infty}S_n=x.
+$$
+
+代回 $x$：
+
+$$
+\boxed{ \displaystyle \lim_{n\to\infty}S_n = \frac{y_0-\sqrt{y_0^2-4}}2 }.
+$$
+
+这题最核心的两步就是：
+
+$$
+\boxed{y_0=x+\frac1x} \quad\Longrightarrow\quad \boxed{y_n=x^{2^n}+x^{-2^n}},
+$$
+
+然后利用这个结构把 $S_n$ 裂项相消。
