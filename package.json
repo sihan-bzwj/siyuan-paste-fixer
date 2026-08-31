@@ -1,12 +1,14 @@
 {
   "name": "siyuan-paste-fixer",
-  "version": "0.1.8",
+  "version": "0.2.3",
   "description": "SiYuan plugin: auto-fix LaTeX and MathML on paste",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.mjs",
-    "test": "node test/run-tests.cjs && node test/stack-cases.cjs && node test/realworld-cases.cjs && node test/mathml-cases.cjs && node test/adversarial.cjs && node test/clipboard-cases.cjs && node test/scenario-cases.cjs"
+    "typecheck": "tsc --noEmit",
+    "test": "node test/run-tests.cjs && node test/stack-cases.cjs && node test/realworld-cases.cjs && node test/mathml-cases.cjs && node test/adversarial.cjs && node test/clipboard-cases.cjs && node test/scenario-cases.cjs",
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "mathml2latex": "^1.1.3"
