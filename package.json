@@ -7,8 +7,8 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node test/run-tests.cjs && node test/stack-cases.cjs && node test/realworld-cases.cjs && node test/mathml-cases.cjs && node test/adversarial.cjs && node test/clipboard-cases.cjs && node test/scenario-cases.cjs",
-    "check": "npm run typecheck && npm test && npm run build"
+    "test": "node test/run-tests.cjs && node test/stack-cases.cjs && node test/realworld-cases.cjs && node test/mathml-cases.cjs && node test/adversarial.cjs && node test/clipboard-cases.cjs && node test/scenario-cases.cjs && node test/manual-action-cases.cjs && node test/context-menu-cases.cjs && node test/settings-cases.cjs && node test/paste-routing-cases.cjs",
+    "check": "npm run typecheck && node test/verify-version.cjs && npm test && npm run build"
   },
   "dependencies": {
     "mathml2latex": "^1.1.3"

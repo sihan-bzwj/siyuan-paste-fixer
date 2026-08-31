@@ -23,7 +23,7 @@ async function main() {
         external: ["mathml2latex"],
         outfile: path.join(__dirname, "_scenario.cjs"), logLevel: "silent",
     });
-    const { detectPasteScenario, looksLikeCode, countMathFormulas, DEFAULT_POLICY } = require("./_scenario.cjs");
+    const { detectPasteScenario, looksLikeCode, countMathFormulas, DEFAULT_POLICY, planPasteHandling } = require("./_scenario.cjs");
     const ctx = (plain = "", html = "", sy = "", inCode = false) => ({textPlain: plain, textHTML: html, siyuanHTML: sy, inCodeTarget: inCode});
     const R = String.raw;
 
@@ -90,6 +90,21 @@ async function main() {
     assert(DEFAULT_POLICY["siyuan-internal"] === "pass" && DEFAULT_POLICY["code-target"] === "pass" && DEFAULT_POLICY["plain-prose"] === "pass", "固定放行场景为 pass");
     assert(countMathFormulas("$x$ 与 $$y=Wx$$ 和 $a_i$") === 3, "公式计数 3");
     assert(countMathFormulas("没有公式") === 0, "公式计数 0");
+
+    console.log("== 8. v0.2.3 边界：弱特征不误判 / 代码里的 LaTeX / 路由裁决 ==");
+    assert(detectPasteScenario(ctx("今天已经完成 80%")) === "plain-prose", "单个弱特征（80%）不是代码");
+    assert(detectPasteScenario(ctx(R`const x = "\frac{a}{b}";`)) === "code-content", "代码字符串里的 \\frac 仍是代码");
+    assert(detectPasteScenario(ctx(R`$font-size: 14px; body { font-size: $font-size; }`)) === "code-content", "SCSS 变量行是代码");
+    assert(detectPasteScenario(ctx(R`x \frac{a}{b} 普通数学`)) === "ai-latex", "普通正文里的 \\frac 仍是数学");
+    assert(detectPasteScenario(ctx(R`\begin{aligned} a &= b \end{aligned}`)) === "ai-latex", "数学环境不会被当成 CSS 规则体");
+    {
+        const plan = (plain, html = "", sy = "", inCode = false, policy = () => "smart") =>
+            planPasteHandling({textPlain: plain, textHTML: html, siyuanHTML: sy, inCodeTarget: inCode, getPolicy: policy});
+        assert(plan(R`\frac{a}{b} 说明`).action === "fix", "AI 数学 smart → fix");
+        assert(plan("普通一句话。").action === "pass", "散文 → pass");
+        assert(plan(R`\frac{x}{y}`, "", "", true).action === "pass", "代码块目标 → pass（inCodeTarget 贯通）");
+        assert(plan(R`\frac{x}{y}`, "", "", false, (s) => (s === "ai-latex" ? "pass" : "smart")).hint === true, "ai-latex pass → 提示");
+    }
 
     console.log(`\n场景分类器测试: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);

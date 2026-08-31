@@ -785,6 +785,67 @@ function isReliableDollarPair(content: string): boolean {
     return /\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]|^[A-Za-z0-9.(),-]+$/.test(core);
 }
 
+export interface InlineMathToken {
+    /** true=数学对（$...$ 且内容可靠），text 为不含定界符的公式本体；false=普通文本 */
+    math: boolean;
+    text: string;
+}
+
+/**
+ * 把文本按可靠的 `$...$` 数学对切成片段（供手动转换、公式计数等共用）。
+ *
+ * 配对规则与 maskLuteUnsafeDollars 的行内分支一致（同一行、未转义闭合、内容
+ * 通过 isReliableDollarPair）：`$5 and $10`、未闭合美元、转义美元都按普通文本
+ * 保留，避免金额/Shell 变量被误当成公式。块级 `$$...$$` 不属于行内配对，原样
+ * 留在文本片段中，由调用方决定如何处理。
+ */
+export function tokenizeInlineMath(markdown: string): InlineMathToken[] {
+    const out: InlineMathToken[] = [];
+    let buf = "";
+    let i = 0;
+    while (i < markdown.length) {
+        if (markdown[i] === "$" && !isEscapedDollar(markdown, i)) {
+            if (markdown[i + 1] === "$") {
+                // 块级 $$...$$ 原子跳过：整块留在文本段，不参与行内配对
+                let close = i + 2;
+                while ((close = markdown.indexOf("$$", close)) >= 0) {
+                    if (!isEscapedDollar(markdown, close)) {
+                        break;
+                    }
+                    close += 2;
+                }
+                const end = close >= 0 ? close + 2 : markdown.length;
+                buf += markdown.slice(i, end);
+                i = end;
+                continue;
+            }
+            let close = i + 1;
+            while (close < markdown.length && markdown[close] !== "\n") {
+                if (markdown[close] === "$" && !isEscapedDollar(markdown, close)) {
+                    break;
+                }
+                close++;
+            }
+            if (close < markdown.length && markdown[close] === "$" &&
+                isReliableDollarPair(markdown.slice(i + 1, close))) {
+                if (buf) {
+                    out.push({math: false, text: buf});
+                    buf = "";
+                }
+                out.push({math: true, text: markdown.slice(i + 1, close)});
+                i = close + 1;
+                continue;
+            }
+        }
+        buf += markdown[i];
+        i++;
+    }
+    if (buf) {
+        out.push({math: false, text: buf});
+    }
+    return out;
+}
+
 /**
  * 遮蔽会让 Lute 重新错配的孤立/非公式美元符号。
  *

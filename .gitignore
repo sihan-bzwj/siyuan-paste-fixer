@@ -7,3 +7,12 @@ test/fixtures/*-fixed.txt
 test/_mathml.cjs
 test/_clipboard.cjs
 test/_scenario.cjs
+test/_fix-latex.cjs
+test/_mathml.cjs
+test/_clipboard.cjs
+test/_scenario.cjs
+test/_manual-action.cjs
+test/_context-menu.cjs
+test/_settings.cjs
+test/_siyuan-stub.cjs
+test/_paste-context.cjs

@@ -3,21 +3,35 @@
  *
  * 注意：SDK 类型的 Plugin.setting 在运行时可能为 undefined（本地环境实测），
  * 与 text-process 一致地用官方 `new Setting(...)` 自建实例并向插件开放保存回调。
+ *
+ * 持久化约定：
+ * - 加载时校验策略值（smart/fix/pass），非法值回默认；
+ * - 保存走串行队列，多次快速点击顶栏时按调用顺序落盘，最后一次操作永远最后生效；
+ * - 面板元素创建时动态读取当前设置，顶栏先改策略再开面板不会显示旧值。
  */
 
 import { Setting } from "siyuan";
+import { ScenarioPolicy } from "./scenario";
 
 export interface PasteFixerSettings {
-    codePolicy?: string;
-    aiPolicy?: string;
-    webPolicy?: string;
-    mixedPolicy?: string;
+    codePolicy?: ScenarioPolicy;
+    aiPolicy?: ScenarioPolicy;
+    webPolicy?: ScenarioPolicy;
+    mixedPolicy?: ScenarioPolicy;
     hintsEnabled?: boolean;
 }
 
 export const SETTINGS_PATH = "/data/storage/petal/paste-fixer/data.json";
 
-/** 从 petal 文件加载设置；任何失败都用空对象（默认策略兜底）。 */
+const POLICY_KEYS = ["codePolicy", "aiPolicy", "webPolicy", "mixedPolicy"] as const;
+const VALID_POLICIES: readonly ScenarioPolicy[] = ["smart", "fix", "pass"];
+
+/** 非法/缺失策略值统一回默认（undefined → 调用方用 DEFAULT_POLICY 兜底）。 */
+function normalizePolicy(value: unknown): ScenarioPolicy | undefined {
+    return VALID_POLICIES.includes(value as ScenarioPolicy) ? value as ScenarioPolicy : undefined;
+}
+
+/** 从 petal 文件加载设置；任何失败/非法值都用空对象（默认策略兜底）。 */
 export async function loadSettingsFromFile(): Promise<PasteFixerSettings> {
     try {
         const r = await fetch("/api/file/getFile", {
@@ -32,24 +46,40 @@ export async function loadSettingsFromFile(): Promise<PasteFixerSettings> {
         if (!txt || !txt.trim()) {
             return {};
         }
-        return JSON.parse(txt) as PasteFixerSettings;
+        const raw = JSON.parse(txt) as Record<string, unknown>;
+        const out: PasteFixerSettings = {};
+        for (const key of POLICY_KEYS) {
+            const v = normalizePolicy(raw[key]);
+            if (v) {
+                out[key] = v;
+            }
+        }
+        if (typeof raw.hintsEnabled === "boolean") {
+            out.hintsEnabled = raw.hintsEnabled;
+        }
+        return out;
     } catch (e) {
         return {};
     }
 }
 
-/** 写入 petal 文件（putFile 为 multipart 接口，与思源存储约定一致）。 */
-export async function saveSettingsToFile(settings: PasteFixerSettings): Promise<void> {
-    try {
-        const blob = new Blob([JSON.stringify(settings)], {type: "application/json"});
-        const fd = new FormData();
-        fd.append("file", blob, "data.json");
-        fd.append("path", SETTINGS_PATH);
-        fd.append("isDir", "false");
-        await fetch("/api/file/putFile", {method: "POST", body: fd});
-    } catch (e) {
-        /* 持久化失败不影响本次会话行为 */
-    }
+// 串行保存队列：连写时按调用顺序落盘，避免异步返回乱序导致旧值覆盖新值
+let saveChain: Promise<void> = Promise.resolve();
+
+async function putFile(payload: string): Promise<void> {
+    const blob = new Blob([payload], {type: "application/json"});
+    const fd = new FormData();
+    fd.append("file", blob, "data.json");
+    fd.append("path", SETTINGS_PATH);
+    fd.append("isDir", "false");
+    await fetch("/api/file/putFile", {method: "POST", body: fd});
+}
+
+/** 写入 petal 文件（putFile 为 multipart 接口；失败不影响本次会话行为）。 */
+export function saveSettingsToFile(settings: PasteFixerSettings): Promise<void> {
+    const payload = JSON.stringify(settings);
+    saveChain = saveChain.then(() => putFile(payload)).catch(() => { /* 单次失败不阻断后续 */ });
+    return saveChain;
 }
 
 /** 场景策略下拉选项（设置面板与顶栏开关共用文案来源）。 */
@@ -61,25 +91,30 @@ export function policyOptions(i18n: Record<string, string>): Array<{text: string
     ];
 }
 
-/** 策略下拉元素：变更即时落盘。 */
+/** 当前生效策略（含默认值兜底）。 */
+export function policyOf(settings: PasteFixerSettings, key: (typeof POLICY_KEYS)[number]): ScenarioPolicy {
+    return normalizePolicy(settings[key]) ?? "smart";
+}
+
+/** 策略下拉元素：创建时动态读取当前设置，变更即时落盘。 */
 export function buildPolicySelect(
     i18n: Record<string, string>,
-    key: string,
-    currentValue: string,
+    key: (typeof POLICY_KEYS)[number],
     settings: PasteFixerSettings,
     save: (settings: PasteFixerSettings) => void,
 ): HTMLElement {
     const select = document.createElement("select");
     select.className = "b3-select";
+    const current = policyOf(settings, key);
     for (const opt of policyOptions(i18n)) {
         const o = document.createElement("option");
         o.value = opt.value;
         o.textContent = opt.text;
-        o.selected = opt.value === currentValue;
+        o.selected = opt.value === current;
         select.appendChild(o);
     }
     select.addEventListener("change", () => {
-        (settings as unknown as Record<string, unknown>)[key] = select.value;
+        settings[key] = normalizePolicy(select.value) ?? "smart";
         save(settings);
     });
     return select;
@@ -112,22 +147,21 @@ export function createSettingsPanel(
 ): Setting {
     const setting = new Setting({confirmCallback: () => save(settings)});
     const addSelect = (
-        key: "codePolicy" | "aiPolicy" | "webPolicy" | "mixedPolicy",
+        key: (typeof POLICY_KEYS)[number],
         title: string,
         desc: string,
-        current: string,
     ): void => {
         setting.addItem({
             title,
             description: desc,
             direction: "row",
-            createActionElement: () => buildPolicySelect(i18n, key, current, settings, save),
+            createActionElement: () => buildPolicySelect(i18n, key, settings, save),
         });
     };
-    addSelect("codePolicy", i18n.settingCodeTitle, i18n.settingCodeDesc, settings.codePolicy || "smart");
-    addSelect("aiPolicy", i18n.settingAITitle, i18n.settingAIDesc, settings.aiPolicy || "smart");
-    addSelect("webPolicy", i18n.settingWebTitle, i18n.settingWebDesc, settings.webPolicy || "smart");
-    addSelect("mixedPolicy", i18n.settingMixedTitle, i18n.settingMixedDesc, settings.mixedPolicy || "smart");
+    addSelect("codePolicy", i18n.settingCodeTitle, i18n.settingCodeDesc);
+    addSelect("aiPolicy", i18n.settingAITitle, i18n.settingAIDesc);
+    addSelect("webPolicy", i18n.settingWebTitle, i18n.settingWebDesc);
+    addSelect("mixedPolicy", i18n.settingMixedTitle, i18n.settingMixedDesc);
     setting.addItem({
         title: i18n.settingHints,
         description: i18n.settingHintsDesc,

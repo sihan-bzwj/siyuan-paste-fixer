@@ -32,5 +32,6 @@
   "quickMixed": "混合内容修复",
   "quickHints": "场景提示",
   "crossBlockRefuse": "跨块操作已拒绝：请逐块选择后再转换（保护块引用）",
-  "blockNeedsWholeBlock": "块级公式请选中完整段落后再转换"
+  "blockNeedsWholeBlock": "块级公式请选中完整段落后再转换",
+  "blockRichRefuse": "当前块包含复杂格式（加粗/链接/行内代码等），请只选择需要处理的纯文本部分"
 }

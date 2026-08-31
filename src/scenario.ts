@@ -14,50 +14,63 @@ const STRONG_LATEX_RE = /\\\[|\\\(|\\begin\{|\$\$|\\[a-zA-Z]{2,}/;
 /**
  * 代码/配置文本的启发式判定。
  *
- * 特征（任一命中即累计）：
- * - CSS 属性/HTML 属性/JS 成员等引号形态：[attr="v"]、<tag attr="v">、obj["k"]
- * - CSS 声明：#hex 色值、px/em/rem 单位、{...} 含 ":" 规则体
- * - JSON 形态：{"key": value}
- * - 代码关键词行：const/let/function/class/import/def 等（行首）
- * - 运算符形态：=>、===、!==、::、->、; 结尾密度
+ * 强特征（单个即可判定，即使内容含 LaTeX 命令——代码字符串里的 `\frac` 不是数学）：
+ * - 行首代码关键词行：const/let/function/class/import/def 等；
+ * - CSS 规则体：行首选择器 + `{ ... }`；
+ * - JSON 对象字面量：{"key": value}；
+ * - HTML 标签带引号属性；`[attr="v"]` 引号形态选择器。
  *
- * 判定：代码特征 ≥2 个，或 1 个强代码特征（选择器/关键词行/JSON/HTML 标签）
- * 且不存在强 LaTeX 信号（含真实 LaTeX 命令的数学文本不会被误判为代码）。
+ * 弱特征（需 ≥2 个且无强 LaTeX 信号才判定为代码）：
+ * - CSS 声明：#hex 色值与 px/em/rem/vw/vh 单位；
+ * - 运算符形态：=>、===、!==、::、->；; 结尾。
+ *
+ * 单个弱特征（如一句带 `=>` 或 `;` 的正文）不再算代码，避免“完成了 80%”
+ * 这类普通句子被误判为 code-content。
  */
 export function looksLikeCode(text: string): boolean {
-    let score = 0;
     const t = text.slice(0, 4000);
-    // CSS/HTML/JS 引号形态
-    if (/\[[a-zA-Z][\w-]*(?:[~^$*|]?=)\s*["'][^\]"']+["']\]/.test(t) || // [attr="v"]
-        /<[a-zA-Z][\w-]*\b[^>]*["'][^>]*["'][^>]*>/.test(t) || // <tag a="v">
-        /\.\w+\s*\[["'][^"']+["']\]/.test(t)) { // obj["k"]
-        score += 2;
+    // 强特征：行首关键词行
+    if (/^\s*(const|let|var|function|class|import|export|def|return|if|else|for|while|switch|case|using|package|public|private|static|async)\b/m.test(t)) {
+        return true;
     }
-    // JSON 形态
-    if (/\{\s*"[^"]+"\s*:/.test(t) && t.includes("}")) {
-        score += 2;
+    // 强特征：SCSS/LESS 变量声明行（$name: value;）
+    if (/^\s*\$[\w-]+\s*:/.test(t)) {
+        return true;
     }
-    // CSS 规则体：选择器 + 花括号体（@media 等）
-    if (/[\w.#][\w.#:@>-]*\s*\{[^{}]*\}/.test(t)) {
-        score += 2;
+    // 强特征：CSS 规则体（行首选择器 + {...}；选择器不允许反斜杠，避免误吞 \begin{...}）
+    if (/^\s*[.#@:\w-]+[\w.#:@>+~()[\]*="' -]*\{[^{}]*\}/m.test(t)) {
+        return true;
     }
-    // CSS 声明特征
-    if (/#[0-9a-fA-F]{3,8}\b/.test(t) || /(?:\d+(?:\.\d+)?)(?:px|em|rem|vw|vh|%)\b/.test(t)) {
-        score += 1;
+    // 强特征：JSON 对象字面量
+    if (/\{\s*"[^"]+"\s*:\s*(?:"[^"]*"|\d+|true|false|null|\[|\{)/.test(t)) {
+        return true;
     }
-    // 代码关键词行（去空白后行首）
-    if (/^\s*(const|let|var|function|class|import|export|def|return|if|else|for|while|switch|case|using|package|public|private|static)\b/m.test(t)) {
-        score += 2;
+    // 强特征：HTML 标签带引号属性 / [attr="v"] 引号形态选择器
+    if (/<[a-zA-Z][\w-]*\b[^>]*["'][^>]*["'][^>]*>/.test(t)) {
+        return true;
     }
-    // 运算符形态
-    if (/=>|===|!==|::|->/.test(t) || /;\s*$/.test(t)) {
-        score += 1;
+    if (/\[[a-zA-Z][\w-]*(?:[~^$*|]?=)\s*["'][^\]"']+["']\]/.test(t)) {
+        return true;
     }
-    if (score < 1) {
-        return false;
+    // 弱特征累计
+    let weak = 0;
+    if (/#[0-9a-fA-F]{3,8}\b/.test(t)) {
+        weak++;
     }
-    // 强 LaTeX 信号存在时不是代码（数学文本优先）
-    return !STRONG_LATEX_RE.test(t);
+    if (/(?:\d+(?:\.\d+)?)(?:px|em|rem|vw|vh)\b/.test(t)) {
+        weak++;
+    }
+    if (/=>|===|!==|::|->/.test(t)) {
+        weak++;
+    }
+    if (/\.\w+\s*\[["'][^"']+["']\]/.test(t)) {
+        weak++; // obj["k"] 成员访问形态
+    }
+    if (/;\s*$/.test(t)) {
+        weak++;
+    }
+    // 强 LaTeX 信号存在时弱特征不生效（数学文本优先）
+    return weak >= 2 && !STRONG_LATEX_RE.test(t);
 }
 
 export type PasteScenario =
@@ -120,14 +133,54 @@ export function detectPasteScenario(input: ScenarioInput): PasteScenario {
     return "mixed";
 }
 
-/** 计算修复后文本中的公式数量（提示文案用） */
+/** 计算修复后文本中的公式数量（提示文案用；行内计数复用 tokenizeInlineMath 的配对可靠性判定） */
 export function countMathFormulas(markdown: string): number {
     const blocks = (markdown.match(/\$\$[\s\S]+?\$\$/g) || []).length;
     const rest = markdown.replace(/\$\$[\s\S]+?\$\$/g, "");
-    const inlines = (rest.match(/\$([^$\n]+?)\$/g) || []).length;
+    const inlines = tokenizeInlineMath(rest).filter((t) => t.math).length;
     return blocks + inlines;
 }
 
+export interface PastePlanInput {
+    textPlain: string;
+    textHTML: string;
+    siyuanHTML: string;
+    /** 原生 paste 快照提供的目标上下文（DOM 捕获通道；事件总线自身无法感知） */
+    inCodeTarget: boolean;
+    getPolicy: (scenario: PasteScenario) => ScenarioPolicy;
+}
+
+export interface PastePlan {
+    scenario: PasteScenario;
+    /** pass=原样放行（含需要提示的情况）；fix=进入修复管线 */
+    action: "pass" | "fix";
+    /** pass 时是否给出场景提示（提示文案与数量由上层处理） */
+    hint: boolean;
+}
+
+/**
+ * 粘贴路由的唯一决策入口（EventBus paste 事件调用）。
+ *
+ * 固定放行场景（siyuan-internal / code-target / plain-prose）直接原样；
+ * code-content 智能策略与所有 pass 策略原样 + 提示；其余进入修复管线。
+ */
+export function planPasteHandling(input: PastePlanInput): PastePlan {
+    const scenario = detectPasteScenario({
+        textPlain: input.textPlain,
+        textHTML: input.textHTML,
+        siyuanHTML: input.siyuanHTML,
+        inCodeTarget: input.inCodeTarget,
+    });
+    if (scenario === "siyuan-internal" || scenario === "code-target" || scenario === "plain-prose") {
+        return {scenario, action: "pass", hint: false};
+    }
+    const policy = input.getPolicy(scenario);
+    if (policy === "pass" || (policy === "smart" && scenario === "code-content")) {
+        return {scenario, action: "pass", hint: true};
+    }
+    return {scenario, action: "fix", hint: false};
+}
+
 // 避免循环依赖：hasMathML 与 looksLikeMath 在各自模块导出
-import { looksLikeMath } from "./fix-latex";
+import { looksLikeMath, tokenizeInlineMath } from "./fix-latex";
 import { hasMathML } from "./mathml";

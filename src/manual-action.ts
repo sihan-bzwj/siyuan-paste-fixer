@@ -2,24 +2,29 @@
  * 手动转换动作层（v0.2.3 拆分自 index.ts）。
  *
  * 核心安全原则（与自动粘贴不同，手动操作默认保守）：
- * - 局部选中：原地替换 range 内容，不删除整个块、不新建 block ID；
- * - 完整单块：走内核 updateBlock（保留原 block ID）；
- * - 跨块：拒绝执行，提示逐块操作，绝不 delete+insert 重建。
+ * - 局部选中：把修复结果整段解析成 文本+公式 片段，一次性原地替换 range，
+ *   任何非公式正文都不能因为手动修复而消失；
+ * - 完整单块：走内核 updateBlock（保留原 block ID）；块内含复杂格式时拒绝，
+ *   绝不静默丢加粗/链接/行内代码；
+ * - 跨块：拒绝执行，提示逐块操作，绝不 delete+insert 重建；
+ * - 光标落在已有公式上：“修复为公式”不动作（已是公式），“还原为纯文本”才还原；
  * - 块级公式出现在局部选择中：提示先选中完整段落。
  *
- * 所有动作基于右键事件传入的 range 快照（event.detail.range 的 clone），
- * 不依赖点击后可能失效的 window.getSelection()。
+ * 编辑器（protyleElement）一律从 range 推导（startContainer → closest
+ * .protyle-wysiwyg），分屏/多编辑器时不会把 input 发给错误编辑器。
  */
+
+import { tokenizeInlineMath, InlineMathToken } from "./fix-latex";
 
 export interface ManualContext {
     /** 右键事件传入 range 的快照（唯一操作上下文） */
     range: Range;
-    /** 所在编辑器（.protyle-wysiwyg），用于持久化 input 派发 */
+    /** 所在编辑器（.protyle-wysiwyg），用于持久化 input 派发；从 range 推导 */
     protyleElement: HTMLElement | null;
-    /** range 起点所在顶层块 */
+    /** range 起点所在最近块 */
     block: HTMLElement | null;
-    /** 覆盖的顶层块列表（跨块判定的依据） */
-    blocks: HTMLElement[];
+    /** range 终点所在最近块（跨块判定用起止两块，不扫描全文档） */
+    endBlock: HTMLElement | null;
     selectedText: string;
     interactionId: number;
     /** 原始 event.detail.protyle 引用（text-process 同款使用方式） */
@@ -30,14 +35,9 @@ export type ManualActionKind =
     | "local-inline"   // 局部行内：原地替换
     | "whole-block"    // 完整单块：updateBlock 保 ID
     | "cross-block"    // 跨块：拒绝
-    | "collapsed-at-math" // 光标在公式内：直接还原该公式
+    | "collapsed-at-math" // 光标在公式内：fix 不动作 / revert 还原
     | "collapsed-text"    // 光标在普通文字：提示选择
     | "none";
-
-export interface ManualActionPlan {
-    kind: ManualActionKind;
-    messageKey: string | null;
-}
 
 /** 生成真实 inline-math span（思源渲染节点形态）。 */
 export function buildInlineMathElement(content: string): HTMLSpanElement {
@@ -75,47 +75,134 @@ export function collapsedAtMath(range: Range): "inline" | "block" | null {
     return null;
 }
 
-/** 判定选区类型：局部行内 / 完整单块 / 跨块。 */
+/** 节点所在最近块（含自身）：从 range 端点推导，不扫描整个文档。 */
+export function resolveLeafBlock(node: Node): HTMLElement | null {
+    if (!node) {
+        return null;
+    }
+    const el = node.nodeType === 1 ? node as Element : node.parentElement;
+    if (!el || typeof el.closest !== "function") {
+        return null;
+    }
+    return el.closest("[data-node-id]") as HTMLElement | null;
+}
+
+/** 从 range 推导所在编辑器（.protyle-wysiwyg）；分屏时不会选错编辑器。 */
+export function deriveProtyleElement(range: Range): HTMLElement | null {
+    const el = range.startContainer.nodeType === 1
+        ? range.startContainer as Element
+        : (range.startContainer.parentElement as Element | null);
+    if (!el || typeof el.closest !== "function") {
+        return null;
+    }
+    return el.closest(".protyle-wysiwyg") as HTMLElement | null;
+}
+
+/** 统一构建操作上下文（右键/顶栏/命令三个入口共用）。 */
+export function captureManualContext(range: Range, protyle: unknown): ManualContext {
+    const clone = range.cloneRange();
+    const detailProtyle = (protyle as {wysiwyg?: {element?: HTMLElement}} | null)?.wysiwyg?.element ?? null;
+    return {
+        range: clone,
+        protyleElement: detailProtyle ?? deriveProtyleElement(clone),
+        block: resolveLeafBlock(clone.startContainer),
+        endBlock: resolveLeafBlock(clone.endContainer),
+        selectedText: clone.toString(),
+        interactionId: 0,
+        protyle,
+    };
+}
+
+/** 选区是否覆盖块的完整文本内容（首尾文本节点边界对齐；无文本块按元素边界比较）。 */
+function selectionCoversBlockText(range: Range, block: HTMLElement): boolean {
+    const textNodes: Text[] = [];
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let n: Node | null = walker.nextNode();
+    while (n) {
+        textNodes.push(n as Text);
+        n = walker.nextNode();
+    }
+    if (textNodes.length === 0) {
+        // 无文本（如 NodeMathBlock）：范围必须恰好覆盖块元素本身
+        return range.startContainer === block && range.startOffset === 0 &&
+            range.endContainer === block && range.endOffset === block.childNodes.length;
+    }
+    const first = textNodes[0];
+    const last = textNodes[textNodes.length - 1];
+    return range.startContainer === first && range.startOffset === 0 &&
+        range.endContainer === last && range.endOffset === last.length;
+}
+
+/** 判定选区类型：局部行内 / 完整单块 / 跨块（起止最近块不同即跨块）。 */
 export function classifyRange(
     range: Range,
-    blocks: HTMLElement[],
+    block: HTMLElement | null,
+    endBlock: HTMLElement | null,
 ): ManualActionKind {
     if (range.collapsed) {
         return collapsedAtMath(range) ? "collapsed-at-math" : "collapsed-text";
     }
-    if (blocks.length === 0) {
+    if (!block || !endBlock) {
         return "none";
     }
-    if (blocks.length > 1) {
-        return "cross-block"; // 跨块保守拒绝
+    if (block !== endBlock) {
+        return "cross-block";
     }
-    // 完整单块：range 覆盖块的全部内容
-    const block = blocks[0];
-    const blockRange = document.createRange();
-    blockRange.selectNodeContents(block);
-    const full =
-        range.startContainer === blockRange.startContainer &&
-        range.startOffset === blockRange.startOffset &&
-        range.endContainer === blockRange.endContainer &&
-        range.endOffset === blockRange.endOffset;
-    return full ? "whole-block" : "local-inline";
+    return selectionCoversBlockText(range, block) ? "whole-block" : "local-inline";
 }
 
-/** 局部行内替换：删除选中内容并插入公式片段。 */
-export function applyLocalInline(
+/** 完整块可能因转换丢掉的复杂行内格式（加粗/链接/行内代码/标签/引用等）；公式节点不算。 */
+const RICH_FORMAT_SELECTOR = [
+    "strong", "b", "em", "i", "u", "s", "del", "mark", "ins", "sub", "sup",
+    "a[href]", "code", "blockquote",
+    '[data-type="NodeCodeSpan"]', '[data-type="NodeInlineCode"]',
+    '[data-type="tag"]', '[data-type="footnotes-ref"]', '[data-type="block-ref"]',
+].join(",");
+
+/** 块内是否含复杂格式：有则整块转换会静默丢格式，0.2.3 暂时拒绝。 */
+export function hasRichFormatting(block: HTMLElement | null): boolean {
+    if (!block) {
+        return false;
+    }
+    return block.querySelector(RICH_FORMAT_SELECTOR) !== null;
+}
+
+/** insertNode 在文本节点边界插入时会把容器文本劈开、留下空 Text 尾巴，清掉（不影响内容）。 */
+function removeEmptySplitTail(last: Node): void {
+    let next: Node | null = last.nextSibling;
+    while (next && next.nodeType === 3 && !(next as Text).data) {
+        const tail = next;
+        next = tail.nextSibling;
+        (tail as Text).remove();
+    }
+}
+
+/** 局部行内替换：把修复结果整段解析成文本/公式片段，一次替换选区（正文不丢失）。 */
+export function applyLocalFragment(
     range: Range,
-    inlineMath: string,
+    tokens: InlineMathToken[],
     protyleElement: HTMLElement | null,
 ): void {
     range.deleteContents();
-    range.insertNode(buildInlineMathElement(inlineMath));
-    // 光标移到公式后
+    const frag = document.createDocumentFragment();
+    for (const token of tokens) {
+        if (token.math) {
+            frag.appendChild(buildInlineMathElement(token.text));
+        } else if (token.text) {
+            frag.appendChild(document.createTextNode(token.text));
+        }
+    }
+    if (!frag.childNodes.length) {
+        return;
+    }
+    const last = frag.childNodes[frag.childNodes.length - 1];
+    range.insertNode(frag);
+    removeEmptySplitTail(last);
+    // 光标移到最后一个节点之后
     const sel = window.getSelection();
     if (sel) {
         const r2 = document.createRange();
-        r2.setStartAfter(range.endContainer.nodeType === 1
-            ? range.endContainer as Node
-            : range.endContainer);
+        r2.setStartAfter(last);
         r2.collapse(true);
         sel.removeAllRanges();
         sel.addRange(r2);
@@ -145,13 +232,14 @@ export async function applyWholeBlock(
 
 /**
  * 从选区还原源码形态（渲染公式 span 无文本内容，需要从 DOM 取回 $...$ 源码）。
- * 用于"还原为纯文本"与"修复"之前的源码获取。
+ * 局部选区只序列化 range 内部；完整公式块直接取 data-content。
  */
-export function extractSourceMarkdown(range: Range, blocks: HTMLElement[]): string {
-    // 单块局部：只序列化 range 内部（inline-math -> $content$，文本原样）
+export function extractSourceMarkdown(range: Range, block: HTMLElement | null): string {
+    if (block?.getAttribute("data-type") === "NodeMathBlock") {
+        return "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
+    }
     const container = document.createElement("div");
-    const cloned = range.cloneContents();
-    container.appendChild(cloned);
+    container.appendChild(range.cloneContents());
     container.querySelectorAll('[data-type="inline-math"]').forEach((m) => {
         const t = document.createElement("span");
         t.textContent = "$" + (m as HTMLElement).getAttribute("data-content") + "$";
@@ -162,27 +250,7 @@ export function extractSourceMarkdown(range: Range, blocks: HTMLElement[]): stri
         t.textContent = "$$\n" + (m as HTMLElement).getAttribute("data-content") + "\n$$";
         m.replaceWith(t);
     });
-    const local = container.textContent || "";
-    if (blocks.length === 1 && local.trim()) {
-        return local.trim();
-    }
-    // 完整多块/整块：逐个块序列化
-    const parts: string[] = [];
-    for (const block of blocks) {
-        if (block.getAttribute("data-type") === "NodeMathBlock") {
-            parts.push("$$\n" + (block.getAttribute("data-content") || "") + "\n$$");
-            continue;
-        }
-        const clone = block.cloneNode(true) as HTMLElement;
-        clone.querySelectorAll('[data-type="NodeMathBlock"]').forEach((n) => n.remove());
-        clone.querySelectorAll('[data-type="inline-math"]').forEach((m) => {
-            const t = document.createElement("span");
-            t.textContent = "$" + (m as HTMLElement).getAttribute("data-content") + "$";
-            m.replaceWith(t);
-        });
-        parts.push((clone.textContent || "").trim());
-    }
-    return parts.join("\n\n");
+    return (container.textContent || "").trim();
 }
 
 /**
@@ -195,10 +263,13 @@ export async function runManualAction(
     fixText: (md: string) => string,
     convertToPlain: (md: string) => string,
 ): Promise<string> {
-    const kind = classifyRange(ctx.range, ctx.blocks);
+    const kind = classifyRange(ctx.range, ctx.block, ctx.endBlock);
 
-    // 光标在公式内：两种动作都做"还原该公式"（内联公式无选区时修复无意义）
+    // 光标在公式内：已有公式时“修复”无意义，只有“还原”才动作
     if (kind === "collapsed-at-math") {
+        if (action === "fix") {
+            return "noChange";
+        }
         const node = ctx.range.startContainer.nodeType === 1
             ? ctx.range.startContainer as HTMLElement
             : (ctx.range.startContainer.parentElement as HTMLElement | null);
@@ -218,42 +289,45 @@ export async function runManualAction(
     if (kind === "collapsed-text" || kind === "none") {
         return "noSelection";
     }
-
-    // 取源码
-    const source = extractSourceMarkdown(ctx.range, ctx.blocks);
-    if (!source.trim()) {
-        return "noSelection";
-    }
-    const out = action === "fix" ? fixText(source) : convertToPlain(source);
-    if (out === source.trim()) {
-        return "noChange";
-    }
-
     if (kind === "cross-block") {
         return "crossBlockRefuse";
     }
+    // 完整块含复杂格式：宁可拒绝，也不静默丢格式
+    if (kind === "whole-block" && hasRichFormatting(ctx.block)) {
+        return "blockRichRefuse";
+    }
 
-    const needsBlock = /\$\$/.test(out);
+    const source = extractSourceMarkdown(ctx.range, ctx.block);
+    if (!source) {
+        return "noSelection";
+    }
+    const out = action === "fix" ? fixText(source) : convertToPlain(source);
+    if (out === source) {
+        return "noChange";
+    }
+
     if (kind === "whole-block") {
-        await applyWholeBlock(ctx.blocks[0], out);
+        await applyWholeBlock(ctx.block!, out);
         return action === "fix" ? "done" : "revertDone";
     }
     // local-inline
     if (action === "revert") {
         // 局部还原仍走原地替换（结果是纯文本）
         ctx.range.deleteContents();
-        ctx.range.insertNode(document.createTextNode(out));
+        const textNode = document.createTextNode(out);
+        ctx.range.insertNode(textNode);
+        removeEmptySplitTail(textNode);
         commitEditorChange(ctx.protyleElement);
         return "revertDone";
     }
-    if (needsBlock) {
+    if (/\$\$/.test(out)) {
         return "blockNeedsWholeBlock"; // 局部选中出现块级公式：提示选整段
     }
-    // 局部行内修复：提取第一个 $...$ 内容生成 inline-math
-    const m = out.match(/\$([^$\n]+?)\$/);
-    if (!m) {
+    // 局部行内修复：整个结果为片段（正文与公式全部保留）
+    const tokens = tokenizeInlineMath(out);
+    if (!tokens.some((t) => t.math)) {
         return "noChange";
     }
-    applyLocalInline(ctx.range, m[1], ctx.protyleElement);
+    applyLocalFragment(ctx.range, tokens, ctx.protyleElement);
     return "done";
 }
