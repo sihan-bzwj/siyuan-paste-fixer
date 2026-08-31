@@ -118,14 +118,39 @@ function convertMathToPlainText(text: string): string {
 }
 
 /**
+ * 把单个块序列化为源 Markdown（渲染公式节点 → $...$ / $$...$$ 源码形态）：
+ * 渲染后的公式 span 没有文本内容，selection.toString() 拿不到定界符，
+ * 反向转换必须先从 DOM 还原源码。非公式内容取纯文本。不做语义解释。
+ */
+function blockToMarkdown(block: HTMLElement): string {
+    if (block.getAttribute("data-type") === "NodeMathBlock") {
+        return "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
+    }
+    const clone = block.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('[data-type="NodeMathBlock"]').forEach((n) => n.remove());
+    clone.querySelectorAll('[data-type="inline-math"]').forEach((m) => {
+        const t = document.createElement("span");
+        t.textContent = "$" + (m as HTMLElement).getAttribute("data-content") + "$";
+        m.replaceWith(t);
+    });
+    return (clone.textContent || "").trim();
+}
+
+/** 选区覆盖的顶层块 → Markdown（含公式源码形态） */
+function selectionToMarkdown(range: Range): string {
+    const blocks = Array.from(document.querySelectorAll(".protyle-wysiwyg [data-node-id]"))
+        .filter((el) => range.intersectsNode(el) &&
+            !(el.parentElement as HTMLElement | null)?.closest?.("[data-node-id]")) as HTMLElement[];
+    return blocks.map(blockToMarkdown).join("\n\n");
+}
+
+/**
  * 双通道粘贴修复：
  * 1. 事件总线通道（官方 paste 事件）
  * 2. DOM 通道（document 捕获阶段原生 paste 事件，修复后重新派发，作为总线失效时的兜底）
  */
 export default class PasteFixer extends Plugin {
-    /** custom-protyle-setting 处理器（设置面板变更落盘用） */
-    private onSettingChange: ((ev: CustomEvent<{config: Record<string, unknown>}>) => void) | null = null;
-    /** 运行时设置（storage API 持久化，键 paste-fixer-settings；不依赖 SDK 基类的 this.data 加载机制） */
+    /** 运行时设置（petal 文件持久化；不依赖 SDK 基类的 this.data 加载机制） */
     private settings: Record<string, unknown> = {};
 
     private async loadSettings(): Promise<void> {
@@ -381,22 +406,29 @@ export default class PasteFixer extends Plugin {
     }
 
     /**
-     * 反向转换：把选中的标准公式形态还原为纯文本（$$...$$ 与 $...$ 去定界符，
-     * 数字打头公式的包装花括号一并还原）。其他内容逐字保留。
-     */
+ * 反向转换：把选中的标准公式形态还原为纯文本（$$...$$ 与 $...$ 去定界符，
+ * 数字打头公式的包装花括号一并还原）。其他内容逐字保留。
+ * 选区覆盖渲染后的公式节点时（无文本内容），先从 DOM 序列化出源码形态再还原。
+ */
     private async revertSelection(): Promise<void> {
         const selection = getSelection();
         if (!selection || selection.rangeCount === 0) {
             showMessage(this.i18n.noSelection, 3000);
             return;
         }
-        const text = selection.getRangeAt(0).toString();
-        if (!text.trim()) {
+        const range = selection.getRangeAt(0);
+        const text = range.toString();
+        // 渲染公式没有文本内容：若选区与公式节点相交，改用 DOM 序列化源码
+        const intersectsMath = Array.from(document.querySelectorAll(
+            '.protyle-wysiwyg [data-type="inline-math"], .protyle-wysiwyg [data-type="NodeMathBlock"]'),
+        ).some((el) => range.intersectsNode(el));
+        const source = (intersectsMath ? selectionToMarkdown(range) : text).trim();
+        if (!source) {
             showMessage(this.i18n.noSelection, 3000);
             return;
         }
-        const reverted = convertMathToPlainText(text);
-        if (reverted === text) {
+        const reverted = convertMathToPlainText(source);
+        if (reverted === source) {
             showMessage(this.i18n.noChange, 3000);
             return;
         }
@@ -415,9 +447,17 @@ export default class PasteFixer extends Plugin {
         }
     }
 
+    /** 提示去重：DOM 通道提示后重发事件，总线通道会再触发一次，1s 内只提示一次 */
+    private lastHintAt = 0;
+
     /** 场景提示（设置可关闭；提示失败不影响粘贴） */
     private maybeHint(scenario: PasteScenario, count: number): void {
         try {
+            const now = Date.now();
+            if (now - this.lastHintAt < 1000) {
+                return;
+            }
+            this.lastHintAt = now;
             if (this.settings.hintsEnabled === false) {
                 return;
             }
@@ -445,20 +485,28 @@ export default class PasteFixer extends Plugin {
         }
     }
 
-    /** 右键菜单：选中文本含数学信号时提供"修复为公式"与"还原为纯文本" */
+    /** 右键菜单：选区/点击位置含数学信号时提供"修复为公式"与"还原为纯文本" */
     private onOpenMenuContent = (event: CustomEvent<MenuContentDetail>) => {
         try {
             const { menu, range } = event.detail;
-            if (!range || range.collapsed) {
+            // 思源传给插件的是点击处光标 range（collapsed），即使已选中文本也可能 collapsed；
+            // 只要求存在 range，不再因 collapsed 退出菜单。
+            if (!menu || !range) {
                 return;
             }
-            // 渲染后的公式 span 没有文本内容，range.toString() 不含 $；
-            // 同时检查选区是否与任何公式节点相交。
             const text = range.toString();
+            // 渲染后的公式 span 没有文本内容，range.toString() 不含 $；
+            // 选区与公式节点相交、或点击位置所在块含公式节点，都算命中。
+            const startEl = range.startContainer.nodeType === 1
+                ? range.startContainer as Element
+                : (range.startContainer.parentElement as Element | null);
+            const block = startEl?.closest?.("[data-node-id]") as HTMLElement | null;
             const intersectsMath = Array.from(document.querySelectorAll(
                 '.protyle-wysiwyg [data-type="inline-math"], .protyle-wysiwyg [data-type="NodeMathBlock"]'),
             ).some((el) => range.intersectsNode(el));
-            if (!looksLikeMath(text) && !intersectsMath) {
+            const blockHasMath = !!block &&
+                block.querySelector('[data-type="inline-math"], [data-type="NodeMathBlock"]') !== null;
+            if (!looksLikeMath(text) && !intersectsMath && !blockHasMath) {
                 return;
             }
             menu.addItem({
@@ -485,91 +533,76 @@ export default class PasteFixer extends Plugin {
         ];
     }
 
-    /** 设置面板：各场景策略 + 场景提示开关。失败不影响粘贴修复。 */
-    private setupSettings(): void {
-        // SDK 1.2.4 类型缺 addSetting，运行时 3.8.2 有 ⇒ 类型化访问（保守 API 原则）
-        const addSetting = (this as unknown as {addSetting?: (config: unknown) => void}).addSetting;
-        if (typeof addSetting !== "function") {
-            return;
+    /** 策略下拉元素：变更即时落盘 */
+    private buildPolicySelect(key: string, value: string): HTMLElement {
+        const select = document.createElement("select");
+        select.className = "b3-select";
+        for (const opt of this.policyOptions()) {
+            const o = document.createElement("option");
+            o.value = opt.value;
+            o.textContent = opt.text;
+            o.selected = opt.value === value;
+            select.appendChild(o);
         }
+        select.addEventListener("change", () => {
+            this.settings[key] = select.value;
+            void this.saveSettings();
+        });
+        return select;
+    }
+
+    /** 提示开关元素：变更即时落盘 */
+    private buildHintsCheckbox(): HTMLElement {
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.className = "b3-switch";
+        box.checked = this.settings.hintsEnabled !== false;
+        box.addEventListener("change", () => {
+            this.settings.hintsEnabled = box.checked;
+            void this.saveSettings();
+        });
+        return box;
+    }
+
+    /** 设置面板：各场景策略 + 场景提示开关（3.x 的 Setting 面板 API）。失败不影响粘贴修复。 */
+    private setupSettings(): void {
         try {
-            addSetting({
-                type: "select",
+            const setting = this.setting;
+            setting.addItem({
                 title: this.i18n.settingCodeTitle,
                 description: this.i18n.settingCodeDesc,
-                dir: "paste-fixer",
-                key: "codePolicy",
-                options: this.policyOptions(),
-                value: this.scenarioPolicy("code-content"),
-                action: {key: "codePolicy", callback: () => undefined},
+                direction: "row",
+                createActionElement: () => this.buildPolicySelect("codePolicy", this.scenarioPolicy("code-content")),
             });
-            addSetting({
-                type: "select",
+            setting.addItem({
                 title: this.i18n.settingAITitle,
                 description: this.i18n.settingAIDesc,
-                dir: "paste-fixer",
-                key: "aiPolicy",
-                options: this.policyOptions(),
-                value: this.scenarioPolicy("ai-latex"),
-                action: {key: "aiPolicy", callback: () => undefined},
+                direction: "row",
+                createActionElement: () => this.buildPolicySelect("aiPolicy", this.scenarioPolicy("ai-latex")),
             });
-            addSetting({
-                type: "select",
+            setting.addItem({
                 title: this.i18n.settingWebTitle,
                 description: this.i18n.settingWebDesc,
-                dir: "paste-fixer",
-                key: "webPolicy",
-                options: this.policyOptions(),
-                value: this.scenarioPolicy("web-math"),
-                action: {key: "webPolicy", callback: () => undefined},
+                direction: "row",
+                createActionElement: () => this.buildPolicySelect("webPolicy", this.scenarioPolicy("web-math")),
             });
-            addSetting({
-                type: "select",
+            setting.addItem({
                 title: this.i18n.settingMixedTitle,
                 description: this.i18n.settingMixedDesc,
-                dir: "paste-fixer",
-                key: "mixedPolicy",
-                options: this.policyOptions(),
-                value: this.scenarioPolicy("mixed"),
-                action: {key: "mixedPolicy", callback: () => undefined},
+                direction: "row",
+                createActionElement: () => this.buildPolicySelect("mixedPolicy", this.scenarioPolicy("mixed")),
             });
-            addSetting({
-                type: "checkbox",
+            setting.addItem({
                 title: this.i18n.settingHints,
                 description: this.i18n.settingHintsDesc,
-                dir: "paste-fixer",
-                key: "hintsEnabled",
-                value: (this.data || {}).hintsEnabled !== false,
-                action: {key: "hintsEnabled", callback: () => undefined},
+                direction: "row",
+                createActionElement: () => this.buildHintsCheckbox(),
             });
         } catch (e) {
             console.error("[paste-fixer] 设置面板注册失败", e);
         }
-        // 设置值变更统一走 custom-protyle-setting 事件落盘到 this.data
-        try {
-            this.onSettingChange = (ev: CustomEvent<{config: Record<string, unknown>}>) => {
-                const config = ev.detail?.config;
-                if (!config) {
-                    return;
-                }
-                let changed = false;
-                for (const key of ["codePolicy", "aiPolicy", "webPolicy", "mixedPolicy", "hintsEnabled"]) {
-                    if (key in config && config[key] !== this.settings[key]) {
-                        this.settings[key] = config[key];
-                        changed = true;
-                    }
-                }
-                if (changed) {
-                    void this.saveSettings();
-                }
-            };
-            // 事件名不在 SDK 类型的 IEventBusMap 中 ⇒ 类型化访问
-            this.eventBus.on("custom-protyle-setting" as never, this.onSettingChange as never);
-            // 异步加载已持久化的设置（加载完成前使用默认值）
-            void this.loadSettings();
-        } catch (e) {
-            console.error("[paste-fixer] 设置事件注册失败", e);
-        }
+        // 异步加载已持久化的设置（加载完成前使用默认值）
+        void this.loadSettings();
     }
 
     onload() {
@@ -605,12 +638,5 @@ export default class PasteFixer extends Plugin {
         document.removeEventListener("paste", this.onDomPaste as EventListener, true);
         this.eventBus.off("paste", this.onPaste);
         this.eventBus.off("open-menu-content", this.onOpenMenuContent);
-        if (this.onSettingChange) {
-            try {
-                this.eventBus.off("custom-protyle-setting" as never, this.onSettingChange as never);
-            } catch (e) {
-                // 设置监听清理失败不影响卸载
-            }
-        }
     }
 }
