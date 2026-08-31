@@ -359,6 +359,22 @@ async function main() {
         assert(false, "最终输出可由 KaTeX 解析", e.message);
     }
 
+    console.log("== 7. 箭头命令白名单断词（separateCommandFromEnglishWord） ==");
+    let arrowOut = fixLatexText("\\boxed{Vertex\\rightarrowEdge\\rightarrowDegree}");
+    assert(arrowOut === "\\boxed{Vertex\\rightarrow Edge\\rightarrow Degree}", "裸文本 \\rightarrowEdge 断词", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("\\boxed{Walk\\rightarrowPath\\rightarrowConnectivity}");
+    assert(arrowOut === "\\boxed{Walk\\rightarrow Path\\rightarrow Connectivity}", "Walk/Path/Connectivity 断词", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("A\\rightarrow B");
+    assert(arrowOut === "A\\rightarrow B", "已有空格不重复补", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("\\rightarrowtail");
+    assert(arrowOut === "\\rightarrowtail", "\\rightarrowtail 合法命令不变", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("\\top T 与 \\to B");
+    assert(arrowOut === "\\top T 与 \\to B", "\\top 不变、\\to 后大写才补", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("\\mapsto X");
+    assert(arrowOut === "\\mapsto X", "白名单内 \\mapsto 后大写补分隔", JSON.stringify(arrowOut));
+    arrowOut = fixLatexText("$\\rightarrowEdge$");
+    assert(arrowOut === "$\\rightarrow Edge$", "$...$ 内部同样断词", JSON.stringify(arrowOut));
+
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }
