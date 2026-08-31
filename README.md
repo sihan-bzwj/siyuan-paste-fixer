@@ -96,6 +96,7 @@ npm install && npm run build
 - `==========` 碎片行、公式片段间空行 → `=`（AI 渲染把等号画成了分割线）
 - `$ x $`（两侧空格）→ `$x$`（否则思源不解析）
 - 数学区中的 NBSP 转普通空格，零宽字符移除；正文与 Unicode 数学符号逐字保留
+- 箭头/关系命令后紧跟大写英文词时补分隔（白名单：`\rightarrow`、`\to`、`\mapsto` 等；`\rightarrowEdge` → `\rightarrow Edge`，`\rightarrowtail`/`\top` 等合法命令不动），修复 AI 渲染吞掉空格导致的 KaTeX `Undefined control sequence`
 - 任意长度反引号/波浪线围栏、行内代码、链接 URL、图片路径、自动链接内部一律不处理；链接可见文字中的显式公式仍可修复
 - 不完整环境、未闭合定界符和混合定界符不猜测补齐，优先保持原文结构
 
@@ -116,7 +117,7 @@ npm run check     # 发布门禁：typecheck → 版本一致 → 全量测试 �
 npm run release-check  # check + 打包 + 发布内容检查
 ```
 
-约 490 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.3 新模块：手动转换（局部全量片段、fix/revert 分流、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、updateBlock 保 ID、跨块拒绝、分屏编辑器推导）、右键菜单（common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照、500ms 时效、文本指纹）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
+约 500 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.3 新模块：手动转换（局部全量片段、fix/revert 分流、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、updateBlock 保 ID、跨块拒绝、分屏编辑器推导）、右键菜单（common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照、500ms 时效、文本指纹）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）、箭头命令白名单断词（`\rightarrowEdge` → `\rightarrow Edge`）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
 
 ## 项目结构
 
