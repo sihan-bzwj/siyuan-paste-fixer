@@ -383,7 +383,7 @@ async function main() {
         range.setEnd(block.lastChild, block.lastChild.length);
         const ctx = M.captureManualContext(range, null);
         const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
-        assert(key === "blockRichRefuse", "行内代码 span 整块拒绝（不扁平化丢格式）", key);
+        assert(key === "inCodeRange", "行内代码 span → inCodeRange（代码硬边界先于白名单拦截）", key);
         assert(updateCalls.length === 0, "未触发 updateBlock");
         assert(domeHtml(block).includes('data-type="code"'), "DOM 原样未动");
         document.body.innerHTML = "";
@@ -414,6 +414,133 @@ async function main() {
         assert(span !== null && (span.getAttribute("data-content") || "").includes("\n"),
             "生成 inline-math span 且 data-content 保留换行", span && JSON.stringify(span.getAttribute("data-content")));
         assert(updateCalls.length === 0, "未走 updateBlock（局部原地替换）");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 19. 跨块还原：节点级（只还原完整选中的公式，不动块结构） ==");
+    {
+        let updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        // 三段：公式+普通文字+公式
+        const p1 = document.createElement("div");
+        p1.setAttribute("data-node-id", "p1");
+        p1.setAttribute("data-type", "NodeParagraph");
+        p1.innerHTML = '这段有 <span data-type="inline-math" data-subtype="math" data-content="x"></span> 公式';
+        editor.appendChild(p1);
+        const p2 = mkBlock(editor, "p2", "中间是普通文字");
+        const p3 = document.createElement("div");
+        p3.setAttribute("data-node-id", "p3");
+        p3.setAttribute("data-type", "NodeParagraph");
+        p3.innerHTML = '<span data-type="inline-math" data-subtype="math" data-content="y"></span> 结束';
+        editor.appendChild(p3);
+        // 跨三段的 range
+        const range = document.createRange();
+        range.setStart(p1.firstChild, 0);
+        range.setEnd(p3.lastChild, p3.lastChild.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "跨块还原多个 inline-math 返回 revertDone", key);
+        assert(p1.querySelector('[data-type="inline-math"]') === null && p3.querySelector('[data-type="inline-math"]') === null,
+            "两块公式都还原为纯文本");
+        assert(p1.textContent.includes("x") && p3.textContent.includes("y"), "公式内容保留");
+        assert(p2.textContent === "中间是普通文字", "中间普通段完全不碰");
+        assert(updateCalls.length === 0, "未走 updateBlock（节点级替换）");
+        assert(p1.getAttribute("data-node-id") === "p1" && p2.getAttribute("data-node-id") === "p2" && p3.getAttribute("data-node-id") === "p3",
+            "三个块的 ID 均保留");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 20. 跨块含 NodeMathBlock：只还原公式块 ==");
+    {
+        let updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        const b1 = mkBlock(editor, "k1", "普通段落");
+        const mb = document.createElement("div");
+        mb.setAttribute("data-node-id", "k2");
+        mb.setAttribute("data-type", "NodeMathBlock");
+        mb.setAttribute("data-content", "E=mc^2");
+        editor.appendChild(mb);
+        const b3 = mkBlock(editor, "k3", "结尾文字");
+        const range = document.createRange();
+        range.setStart(b1.firstChild, 0);
+        range.setEnd(b3.firstChild, 4);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "跨块含公式块还原返回 revertDone", key);
+        assert(updateCalls.length === 1 && updateCalls[0].id === "k2" && updateCalls[0].data === "E=mc^2",
+            "只对公式块 k2 走 updateBlock（转回文本）", JSON.stringify(updateCalls));
+        assert(b1.textContent === "普通段落" && b3.textContent === "结尾文字", "普通段落不碰");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 21. 块类型门禁：Heading/C 代码块整块拒绝 ==");
+    {
+        let updateCalls = [];
+        global.fetch = async () => { updateCalls++; return {ok: true, json: async () => ({code: 0})}; };
+        const editor = mkEditor();
+        const heading = document.createElement("div");
+        heading.setAttribute("data-node-id", "h1");
+        heading.setAttribute("data-type", "NodeHeading");
+        heading.textContent = "标题 x^2";
+        editor.appendChild(heading);
+        const range = document.createRange();
+        range.setStart(heading.firstChild, 0);
+        range.setEnd(heading.firstChild, heading.firstChild.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "blockTypeRefuse", "Heading 整块强制转换 → blockTypeRefuse（块类型保护）", key);
+        assert(updateCalls.length === 0, "未触发 updateBlock");
+        document.body.innerHTML = "";
+
+        updateCalls = [];
+        const codeBlock = document.createElement("div");
+        codeBlock.setAttribute("data-node-id", "c1");
+        codeBlock.setAttribute("data-type", "NodeCodeBlock");
+        codeBlock.textContent = "x_i";
+        editor.appendChild(codeBlock);
+        const r2 = document.createRange();
+        r2.setStart(codeBlock.firstChild, 0);
+        r2.setEnd(codeBlock.firstChild, 3);
+        const ctx2 = M.captureManualContext(r2, null);
+        const key2 = await M.runManualAction(ctx2, "fix", fixLatexText, convertToPlain);
+        assert(key2 === "inCodeRange", "代码块内强制转换 → inCodeRange（代码硬边界）", key2);
+        assert(updateCalls.length === 0, "代码块未触发 updateBlock");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 22. 局部多行 + 两侧空格：空格保留、公式本体含换行 ==");
+    {
+        const editor = mkEditor();
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "bJ");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = "P  x^2<br>+y^2  Q";
+        editor.appendChild(block);
+        // 选 "  x^2<br>+y^2  "（含两侧空格，到 Q 前）
+        const range = document.createRange();
+        range.setStart(block.firstChild, 2);
+        range.setEnd(block.childNodes[2], 6);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "done", "多行+空格局部转换返回 done", key);
+        const span = block.querySelector('[data-type="inline-math"]');
+        assert(span !== null && (span.getAttribute("data-content") || "").includes("\n"),
+            "公式本体（trim 判定）含换行", span && JSON.stringify(span.getAttribute("data-content")));
+        assert(span !== null && (span.getAttribute("data-content") || "").endsWith("+y^2"),
+            "公式内容不含尾随空格（空格被 trim 到外围）", span && JSON.stringify(span.getAttribute("data-content")));
+        const before = span.previousSibling;
+        const after = span.nextSibling;
+        assert(before !== null && !before.textContent.endsWith("x^2"), "前置文本存在（无劈裂吞内容）", JSON.stringify(before && before.textContent));
+        assert(before.textContent !== "" && /^\s+$/.test(before.textContent), "leading 选中空格保留", JSON.stringify(before.textContent));
+        assert(after !== null && after.textContent === "  ", "trailing 选中空格保留", JSON.stringify(after && after.textContent));
         document.body.innerHTML = "";
     }
 

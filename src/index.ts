@@ -10,6 +10,7 @@ import {selectClipboardMarkdown} from "./clipboard";
 import {
     countMathFormulas,
     DEFAULT_POLICY,
+    hasComplexRichHTML,
     PasteScenario,
     planPasteHandling,
     ScenarioPolicy,
@@ -70,6 +71,8 @@ export default class PasteFixer extends Plugin {
             const textPlain = detail.textPlain || "";
             const siyuanHTML = detail.siyuanHTML || "";
             const files = detail.files;
+            // 复杂富文本结构：链接/图片/表格/列表/标题/引用（重写会丢结构 → fail-closed 原样）
+            const complexRichHTML = hasComplexRichHTML(textHTML);
 
             // 消费原生 paste 快照（代码块目标信息事件总线无法自行感知；带指纹校验）
             const snap = consumePasteContext(this.pasteSnapshot, Date.now(), {textPlain, textHTML});
@@ -127,7 +130,15 @@ export default class PasteFixer extends Plugin {
                 return;
             }
 
-            const richHTML = /<(h[1-6]|li|ul|ol|table|img|pre|blockquote|strong|b|i|em|a)[\s>]/i.test(textHTML);
+            // 复杂富文本（链接/图片/表格/列表/标题/引用）无法无损重写：
+            // 原样粘贴 + 提示可右键强制转换——绝不为了公式丢结构（Issue #1 范围契约）
+            if (complexRichHTML) {
+                this.maybeHintRich();
+                resolve(detail);
+                return;
+            }
+
+            const richHTML = /<(strong|b|i|em|a)[\s>]/i.test(textHTML);
             // 修复后的 Markdown 若仍含孤立/非公式美元，不能直接交给思源重新
             // 配对；必须先走 mdToSiyuanHTML，让占位符把它固定成普通文本。
             const protectedForCheck = maskProtectedSegments(fixed);
@@ -137,7 +148,8 @@ export default class PasteFixer extends Plugin {
                 resolve({textHTML: "", textPlain: fixed, siyuanHTML: "", files});
                 return;
             }
-            // 富文本但无 MathML：修复后的 Markdown 交给内核转 DOM（牺牲富格式，保住公式修复）
+            // 轻量富文本（加粗/斜体等）但无 MathML：修复后的 Markdown 交给内核转 DOM
+            // （损失的是简单行内样式，公式修复优先）
             const lute = getLute();
             if (lute) {
                 try {
@@ -183,6 +195,20 @@ export default class PasteFixer extends Plugin {
 
     /** 提示去重：事件总线与快照路径各提示一次，1s 内只提示一次 */
     private lastHintAt = 0;
+
+    /** 复杂富文本原样粘贴提示（去重/开关与场景提示一致） */
+    private maybeHintRich(): void {
+        try {
+            const now = Date.now();
+            if (now - this.lastHintAt < 1000 || this.settings.hintsEnabled === false) {
+                return;
+            }
+            this.lastHintAt = now;
+            showMessage(this.i18n.hintRichPreserved, 6000);
+        } catch (e) {
+            /* 提示失败不影响粘贴 */
+        }
+    }
 
     /** 场景提示（设置可关闭；提示失败不影响粘贴） */
     private maybeHint(scenario: PasteScenario, count: number): void {

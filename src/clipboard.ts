@@ -24,16 +24,16 @@ const COMPLETE_ENV_RE = /\\begin\{(math|displaymath|equation\*?|align\*?|gather\
  * 判断 plain 是否含可独立使用的完整公式。
  * 单个 `$HOME`、金额和未闭合定界符不算；完整环境、\(...\)、\[...\]、
  * $$...$$ 以及内容带数学信号的 $...$（统一扫描器口径，允许跨行）才能参与
- * “plain 优先”裁决；只扫描非保护段，代码围栏里的 $ 不算信号。
+ * “plain 优先”裁决；强定界符信号同样只看非保护段（fence 里的不能算）。
  */
 export function hasReliablePlainMath(text: string): boolean {
-    if (/\\\[[\s\S]+?\\\]|\\\([\s\S]{1,500}?\\\)|\$\$[\s\S]+?\$\$/.test(text) ||
-        COMPLETE_ENV_RE.test(text)) {
-        return true;
-    }
     for (const segment of splitMarkdownSegments(text)) {
         if (segment.protected) {
             continue;
+        }
+        if (/\\\[[\s\S]+?\\\]|\\\([\s\S]{1,500}?\\\)|\$\$[\s\S]+?\$\$/.test(segment.text) ||
+            COMPLETE_ENV_RE.test(segment.text)) {
+            return true;
         }
         if (scanDollarMath(segment.text, {multiline: true}).length > 0) {
             return true;

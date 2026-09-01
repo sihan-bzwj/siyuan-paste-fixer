@@ -23,7 +23,7 @@ async function main() {
         external: ["mathml2latex"],
         outfile: path.join(__dirname, "_scenario.cjs"), logLevel: "silent",
     });
-    const { detectPasteScenario, looksLikeCode, countMathFormulas, DEFAULT_POLICY, planPasteHandling } = require("./_scenario.cjs");
+    const { detectPasteScenario, looksLikeCode, countMathFormulas, DEFAULT_POLICY, planPasteHandling, hasComplexRichHTML } = require("./_scenario.cjs");
     const ctx = (plain = "", html = "", sy = "", inCode = false) => ({textPlain: plain, textHTML: html, siyuanHTML: sy, inCodeTarget: inCode});
     const R = String.raw;
 
@@ -98,6 +98,13 @@ async function main() {
         assert(detectPasteScenario(ctx("$x+y\nz+w$")) === "mixed", "纯跨行 $...$ 不再判 plain-prose（进入修复管线）");
         assert(plan("$x+y\nz+w$").action === "fix", "跨行公式路由到 fix");
         assert(detectPasteScenario(ctx("```txt\n$x_i$\n```")) === "plain-prose", "围栏内的 $ 不触发数学场景");
+        assert(detectPasteScenario(ctx("```latex\n\\frac{x}{y}\n```")) === "plain-prose", "围栏内的 \\frac 不触发数学场景（强信号同口径）");
+        assert(detectPasteScenario(ctx("```text\n$$\nx\n$$\n```")) === "plain-prose", "围栏内的 $$ 不触发数学场景");
+        assert(detectPasteScenario(ctx("```js\nconst a = 1;\n```\n公式 \\(x_i\\)")) === "ai-latex", "fenced JS + 外部公式：只按外部正文判定（不整体判 code）");
+        assert(hasComplexRichHTML('<p>参考 <a href="https://example.com">链接</a> 公式 \\(x^2\\)</p>') === true, "含链接的富文本判为复杂结构（fail-closed 原样）");
+        assert(hasComplexRichHTML("<table><tr><td>1</td></tr></table>") === true, "表格判为复杂结构");
+        assert(hasComplexRichHTML("<p>普通段落 <strong>加粗</strong></p>") === false, "简单行内格式不算复杂结构");
+        assert(hasComplexRichHTML("<p>纯文本</p>") === false, "纯段落不拦");
         assert(detectPasteScenario(ctx("今天已经完成 80%")) === "plain-prose", "单个弱特征（80%）不是代码");
         assert(detectPasteScenario(ctx(R`const x = "\frac{a}{b}";`)) === "code-content", "代码字符串里的 \\frac 仍是代码");
         assert(detectPasteScenario(ctx(R`$font-size: 14px; body { font-size: $font-size; }`)) === "code-content", "SCSS 变量行是代码");

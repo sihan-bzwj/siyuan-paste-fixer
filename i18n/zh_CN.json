@@ -33,7 +33,10 @@
   "quickWeb": "网页公式转换",
   "quickMixed": "混合内容修复",
   "quickHints": "场景提示",
-  "crossBlockRefuse": "跨块操作已拒绝：请逐块选择后再转换（保护块引用）",
+  "crossBlockRefuse": "跨块操作已拒绝：请逐块选择后再转换（保护块引用与块类型）",
   "blockNeedsWholeBlock": "块级公式请选中完整段落后再转换",
-  "blockRichRefuse": "当前块包含复杂格式（加粗/链接/行内代码等），请只选择需要处理的纯文本部分"
+  "blockRichRefuse": "当前块包含复杂格式（加粗/链接/行内代码等），请只选择需要处理的纯文本部分",
+  "blockTypeRefuse": "该块类型不支持整块转换（保护块类型不变）",
+  "inCodeRange": "代码区域内不参与公式转换",
+  "hintRichPreserved": "检测到复杂富文本（链接/图片/表格等），为避免丢失格式已原样粘贴；可选中公式后右键「强制转换为公式」"
 }

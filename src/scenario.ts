@@ -117,8 +117,9 @@ export function detectPasteScenario(input: ScenarioInput): PasteScenario {
     if (hasMathML(textHTML)) {
         return "web-math";
     }
-    // 4. 代码/配置文本：代码特征强且无强 LaTeX 信号
-    if (looksLikeCode(textPlain)) {
+    // 4. 代码/配置文本：只看非保护段（fenced code 不参与代码/数学竞争，
+    //    外部有公式 + 内部有 JS 时只按外部正文判定）
+    if (looksLikeCode(nonProtectedText(textPlain))) {
         return "code-content";
     }
     // 5. 纯散文：无数学信号
@@ -158,6 +159,14 @@ export interface PastePlanInput {
     getPolicy: (scenario: PasteScenario) => ScenarioPolicy;
 }
 
+/**
+ * 复杂富文本结构判定（链接/图片/表格/列表/标题/引用）：这些结构无法无损重写，
+ * 粘贴时插件 fail-closed 原样放行（绝不为了公式丢结构）。
+ */
+export function hasComplexRichHTML(textHTML: string): boolean {
+    return /<(a|img|table|pre|ul|ol|li|h[1-6]|blockquote)[\s>]/i.test(textHTML);
+}
+
 export interface PastePlan {
     scenario: PasteScenario;
     /** pass=原样放行（含需要提示的情况）；fix=进入修复管线 */
@@ -190,5 +199,5 @@ export function planPasteHandling(input: PastePlanInput): PastePlan {
 }
 
 // 避免循环依赖：hasMathML 与 looksLikeMath 在各自模块导出
-import { looksLikeMath, splitMarkdownSegments, tokenizeMath } from "./fix-latex";
+import { looksLikeMath, nonProtectedText, splitMarkdownSegments, tokenizeMath } from "./fix-latex";
 import { hasMathML } from "./mathml";

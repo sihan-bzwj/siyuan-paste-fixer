@@ -311,6 +311,96 @@ async function main() {
         done(handlers);
     }
 
+    console.log("== 12. 代码区域硬边界：代码块/行内代码不出现插件公式操作 ==");
+    {
+        const editor = mkEditor();
+        let block = document.createElement("div");
+        block.setAttribute("data-node-id", "c1");
+        block.setAttribute("data-type", "NodeCodeBlock");
+        block.textContent = "x_i";
+        editor.appendChild(block);
+        const menu1 = mkSingletonMenu();
+        const {handlers: handlers1} = makeHandlers();
+        selectIn(block);
+        rightClick(block);
+        handlers1.onCommonMenuOpen({detail: {menu: {element: menu1}}});
+        assert(menu1.querySelectorAll("[data-paste-fixer-owned]").length === 0, "代码块内不注入项");
+        done(handlers1);
+        document.body.innerHTML = "";
+
+        const editor2 = mkEditor();
+        const p = document.createElement("div");
+        p.setAttribute("data-node-id", "c2");
+        p.setAttribute("data-type", "NodeParagraph");
+        p.innerHTML = '前 <span data-type="code">y</span> 后';
+        editor2.appendChild(p);
+        const menu2 = mkSingletonMenu();
+        const {handlers: handlers2} = makeHandlers();
+        const range = document.createRange();
+        range.setStart(p.firstChild, 0);
+        range.setEnd(p.lastChild, p.lastChild.length);
+        const sel = dom.window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        rightClick(p);
+        handlers2.onCommonMenuOpen({detail: {menu: {element: menu2}}});
+        assert(menu2.querySelectorAll("[data-paste-fixer-owned]").length === 0, "含行内代码 span 的选区不注入项");
+        done(handlers2);
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 13. 跨块选区：只显示「还原为纯文本」（公式）/ 不显示（无公式） ==");
+    {
+        const editor = mkEditor();
+        const b1 = document.createElement("div");
+        b1.setAttribute("data-node-id", "m1");
+        b1.setAttribute("data-type", "NodeParagraph");
+        b1.innerHTML = '<span data-type="inline-math" data-subtype="math" data-content="x"></span> 第一段';
+        editor.appendChild(b1);
+        const b2 = document.createElement("div");
+        b2.setAttribute("data-node-id", "m2");
+        b2.setAttribute("data-type", "NodeParagraph");
+        b2.textContent = "第二段普通文字";
+        editor.appendChild(b2);
+        const {handlers, messages} = makeHandlers();
+        const menu = mkSingletonMenu();
+        const range = document.createRange();
+        range.setStart(b1.firstChild, 0);
+        range.setEnd(b2.firstChild, 4);
+        const sel = dom.window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        rightClick(b1);
+        handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
+        assert(actions(menu).sort().join(",") === "revert", "跨块含公式：只显示「还原为纯文本」", actions(menu).sort().join(","));
+        // 点击后节点级还原
+        menu.querySelector('[data-paste-fixer-action="revert"]').click();
+        await tick();
+        assert(b1.querySelector('[data-type="inline-math"]') === null, "跨块还原真实生效", b1.innerHTML);
+        assert(b2.textContent === "第二段普通文字", "普通段不碰");
+        assert(messages.length === 1 && messages[0] === "revertDone", "提示 revertDone", messages.join(","));
+        done(handlers);
+        document.body.innerHTML = "";
+
+        // 跨块无公式：什么都不显示
+        const editor2 = mkEditor();
+        const n1 = mkBlock(editor2, "n1", "甲");
+        const n2 = mkBlock(editor2, "n2", "乙");
+        const {handlers: h2} = makeHandlers();
+        const menu2 = mkSingletonMenu();
+        const r2 = document.createRange();
+        r2.setStart(n1.firstChild, 0);
+        r2.setEnd(n2.firstChild, 1);
+        const sel2 = dom.window.getSelection();
+        sel2.removeAllRanges();
+        sel2.addRange(r2);
+        rightClick(n1);
+        h2.onCommonMenuOpen({detail: {menu: {element: menu2}}});
+        assert(menu2.querySelectorAll("[data-paste-fixer-owned]").length === 0, "跨块无公式：不显示任何项");
+        done(h2);
+        document.body.innerHTML = "";
+    }
+
     console.log(`\n右键菜单测试: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }

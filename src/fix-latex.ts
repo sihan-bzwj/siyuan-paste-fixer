@@ -83,17 +83,26 @@ const STRONG_TOKEN_RE = /\\(?:frac|dfrac|sum|int|prod|sqrt|mathbb|left|right|tex
 /** 数学信号（粘贴拦截和右键菜单显示判断共用；含 Markdown 转义形态） */
 const MATH_SIGNALS_RE = /\$\$|\\\[|\\\]|\\\(|\\\)|\\begin\{|\\boxed\{|\\underbrace\{|\\frac\{|<math[\s>]|\\\\[a-zA-Z]|\\[_=^]/i;
 
+/** 非保护段拼接文本（代码围栏/行内代码/链接/URL 之外的内容），供场景分类只基于可见正文判定。 */
+export function nonProtectedText(text: string): string {
+    return splitMarkdownSegments(text)
+        .filter((segment) => !segment.protected)
+        .map((segment) => segment.text)
+        .join("");
+}
+
 export function looksLikeMath(text: string): boolean {
-    // 强定界符信号；否则只扫非保护段（代码围栏里的 $ 不会让整个代码片段误入数学场景），
+    // 全部数学信号只看非保护段：fence 里的 \frac/$$ 不算数学信号，
     // 且允许跨行配对（纯跨行 $...$ 也能触发修复管线）。
-    if (MATH_SIGNALS_RE.test(text)) {
-        return true;
-    }
     for (const segment of splitMarkdownSegments(text)) {
         if (segment.protected) {
             continue;
         }
-        if (scanDollarMath(segment.text.slice(0, 4000), {multiline: true}).length > 0) {
+        const t = segment.text.slice(0, 4000);
+        if (MATH_SIGNALS_RE.test(t)) {
+            return true;
+        }
+        if (scanDollarMath(t, {multiline: true}).length > 0) {
             return true;
         }
     }

@@ -128,6 +128,36 @@ async function main() {
         document.body.innerHTML = "";
     }
 
+    console.log("== 2c. 分屏 code caret 不污染：selection 须属于本次粘贴的编辑器 ==");
+    {
+        const editorA = document.createElement("div");
+        editorA.className = "protyle-wysiwyg";
+        document.body.appendChild(editorA);
+        const editorB = document.createElement("div");
+        editorB.className = "protyle-wysiwyg";
+        document.body.appendChild(editorB);
+        // B 编辑器里 caret 在行内代码内
+        const codeSpan = document.createElement("span");
+        codeSpan.setAttribute("data-type", "code");
+        codeSpan.textContent = "z";
+        editorB.appendChild(codeSpan);
+        const range = document.createRange();
+        range.setStart(codeSpan.firstChild, 1);
+        range.collapse(true);
+        const sel = dom.window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        // 在 A 编辑器普通位置粘贴：B 的 code selection 不应污染判定
+        const aTarget = document.createElement("div");
+        editorA.appendChild(aTarget);
+        const snap = capturePasteContext({
+            target: aTarget,
+            clipboardData: {files: [], getData: () => "$x^2$"},
+        });
+        assert(snap !== null && snap.inCodeTarget === false, "另一编辑器 code caret 不污染当前粘贴", JSON.stringify(snap));
+        document.body.innerHTML = "";
+    }
+
     console.log("== 3. 代码块目标 + LaTeX 内容：一律 code-target 放行 ==");
     {
         const s = detectPasteScenario({textPlain: R`const x = "\frac{a}{b}";`, textHTML: "", siyuanHTML: "", inCodeTarget: true});

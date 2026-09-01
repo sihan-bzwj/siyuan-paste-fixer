@@ -13,7 +13,7 @@
  * 菜单复用时不会残留空分隔线。手动动作一律使用右键事件的 range 快照。
  */
 
-import { captureManualContext, collapsedAtMath, ManualContext, runManualAction } from "./manual-action";
+import { captureManualContext, collapsedAtMath, isCodeRange, ManualContext, runManualAction } from "./manual-action";
 
 export interface MenuDeps {
     i18n: Record<string, string>;
@@ -37,16 +37,26 @@ function rangeContainsMath(range: Range): boolean {
 }
 
 /**
- * 菜单项按上下文显示：
+ * 菜单项按上下文显示（与手动动作的语义/边界完全一致）：
+ * - 代码区域（代码块/行内代码）→ 不显示任何公式操作（issue #1 硬边界）；
  * - 光标在公式内 → 只「还原为纯文本」；
- * - 普通文字且无选择 → 不显示任何公式操作；
- * - 有选区 → 「强制转换为公式」；选区覆盖公式节点时再加「还原为纯文本」。
+ * - 普通文字且无选择 → 不显示；
+ * - 跨块选区 → 不显示「强制转换」（整块语义无法保证）；选区覆盖公式节点时
+ *   显示「还原为纯文本」（节点级还原安全）；
+ * - 单块有选区 → 「强制转换为公式」；选区覆盖公式节点时再加「还原为纯文本」。
  */
 function menuActionsFor(ctx: ManualContext): {fix: boolean, revert: boolean} {
+    if (isCodeRange(ctx.range)) {
+        return {fix: false, revert: false};
+    }
     if (ctx.range.collapsed) {
         return collapsedAtMath(ctx.range) ? {fix: false, revert: true} : {fix: false, revert: false};
     }
     const hasMath = rangeContainsMath(ctx.range);
+    // 跨块：只允许节点级还原
+    if (ctx.block !== ctx.endBlock) {
+        return {fix: false, revert: hasMath};
+    }
     return {fix: true, revert: hasMath};
 }
 
