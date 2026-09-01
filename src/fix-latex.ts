@@ -18,7 +18,6 @@
 const BLOCK_BRACKET_RE = /\\\[([\s\S]+?)\\\]/g; // \[ ... \]
 const INLINE_BRACKET_RE = /\\\(([\s\S]{0,500}?)\\\)/g; // \( ... \)（内容可含括号，如 \( f(x) \)；上限防未闭合时 O(n²)）
 const BLOCK_DOLLAR_RE = /\$\$([\s\S]+?)\$\$/g; // $$ ... $$
-const INLINE_DOLLAR_RE = /\$([^$\n\u0001\u0002]+)\$/g; // $ ... $（单行；不穿过占位符）
 
 interface ProtectedRange {
     start: number;
@@ -85,11 +84,20 @@ const STRONG_TOKEN_RE = /\\(?:frac|dfrac|sum|int|prod|sqrt|mathbb|left|right|tex
 const MATH_SIGNALS_RE = /\$\$|\\\[|\\\]|\\\(|\\\)|\\begin\{|\\boxed\{|\\underbrace\{|\\frac\{|<math[\s>]|\\\\[a-zA-Z]|\\[_=^]/i;
 
 export function looksLikeMath(text: string): boolean {
-    // 强定界符信号；或至少存在一对可靠 $...$（不再简单数 $，金额/Shell 不误判）
+    // 强定界符信号；否则只扫非保护段（代码围栏里的 $ 不会让整个代码片段误入数学场景），
+    // 且允许跨行配对（纯跨行 $...$ 也能触发修复管线）。
     if (MATH_SIGNALS_RE.test(text)) {
         return true;
     }
-    return scanDollarMath(text.slice(0, 4000), {multiline: false}).length > 0;
+    for (const segment of splitMarkdownSegments(text)) {
+        if (segment.protected) {
+            continue;
+        }
+        if (scanDollarMath(segment.text.slice(0, 4000), {multiline: true}).length > 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /** 双反斜杠折叠白名单：只有这些命令前的 \\ 才可能是 Markdown 转义损伤（\\frac → \frac）。

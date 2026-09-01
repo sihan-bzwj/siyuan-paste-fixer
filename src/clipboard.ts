@@ -7,7 +7,7 @@
  * 共用同一套规则，也能在 Node/jsdom 中直接测试。
  */
 
-import {fixLatexText} from "./fix-latex";
+import {fixLatexText, scanDollarMath, splitMarkdownSegments} from "./fix-latex";
 import {convertMathMLInHTML, hasMathML, MathSourceKind} from "./mathml";
 
 export interface ClipboardDecision {
@@ -23,22 +23,19 @@ const COMPLETE_ENV_RE = /\\begin\{(math|displaymath|equation\*?|align\*?|gather\
 /**
  * 判断 plain 是否含可独立使用的完整公式。
  * 单个 `$HOME`、金额和未闭合定界符不算；完整环境、\(...\)、\[...\]、
- * $$...$$ 以及内容带数学信号的 $...$ 才能参与“plain 优先”裁决。
+ * $$...$$ 以及内容带数学信号的 $...$（统一扫描器口径，允许跨行）才能参与
+ * “plain 优先”裁决；只扫描非保护段，代码围栏里的 $ 不算信号。
  */
 export function hasReliablePlainMath(text: string): boolean {
     if (/\\\[[\s\S]+?\\\]|\\\([\s\S]{1,500}?\\\)|\$\$[\s\S]+?\$\$/.test(text) ||
         COMPLETE_ENV_RE.test(text)) {
         return true;
     }
-    const inline = /(^|[^\\$])\$([^$\n]+)\$/g;
-    let match: RegExpExecArray | null;
-    while ((match = inline.exec(text))) {
-        const core = match[2].trim();
-        if (!core || /^\d+(?:[.,]\d+)?(?:\s*[-–—]\s*)?$/.test(core) ||
-            /^(?:[A-Z_][A-Z0-9_]*|\{[A-Z_][A-Z0-9_]*\})(?:[\\/][^\s]*)?$/.test(core)) {
+    for (const segment of splitMarkdownSegments(text)) {
+        if (segment.protected) {
             continue;
         }
-        if (/\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]|^[A-Za-z]$/.test(core)) {
+        if (scanDollarMath(segment.text, {multiline: true}).length > 0) {
             return true;
         }
     }

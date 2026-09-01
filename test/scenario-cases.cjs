@@ -91,15 +91,18 @@ async function main() {
     assert(countMathFormulas("$x$ 与 $$y=Wx$$ 和 $a_i$") === 3, "公式计数 3");
     assert(countMathFormulas("没有公式") === 0, "公式计数 0");
 
-    console.log("== 8. v0.2.3 边界：弱特征不误判 / 代码里的 LaTeX / 路由裁决 ==");
-    assert(detectPasteScenario(ctx("今天已经完成 80%")) === "plain-prose", "单个弱特征（80%）不是代码");
-    assert(detectPasteScenario(ctx(R`const x = "\frac{a}{b}";`)) === "code-content", "代码字符串里的 \\frac 仍是代码");
-    assert(detectPasteScenario(ctx(R`$font-size: 14px; body { font-size: $font-size; }`)) === "code-content", "SCSS 变量行是代码");
-    assert(detectPasteScenario(ctx(R`x \frac{a}{b} 普通数学`)) === "ai-latex", "普通正文里的 \\frac 仍是数学");
-    assert(detectPasteScenario(ctx(R`\begin{aligned} a &= b \end{aligned}`)) === "ai-latex", "数学环境不会被当成 CSS 规则体");
+    console.log("== 8. v0.2.5 边界：跨行公式进场景、围栏内 $ 不误判、弱特征 ==");
     {
         const plan = (plain, html = "", sy = "", inCode = false, policy = () => "smart") =>
             planPasteHandling({textPlain: plain, textHTML: html, siyuanHTML: sy, inCodeTarget: inCode, getPolicy: policy});
+        assert(detectPasteScenario(ctx("$x+y\nz+w$")) === "mixed", "纯跨行 $...$ 不再判 plain-prose（进入修复管线）");
+        assert(plan("$x+y\nz+w$").action === "fix", "跨行公式路由到 fix");
+        assert(detectPasteScenario(ctx("```txt\n$x_i$\n```")) === "plain-prose", "围栏内的 $ 不触发数学场景");
+        assert(detectPasteScenario(ctx("今天已经完成 80%")) === "plain-prose", "单个弱特征（80%）不是代码");
+        assert(detectPasteScenario(ctx(R`const x = "\frac{a}{b}";`)) === "code-content", "代码字符串里的 \\frac 仍是代码");
+        assert(detectPasteScenario(ctx(R`$font-size: 14px; body { font-size: $font-size; }`)) === "code-content", "SCSS 变量行是代码");
+        assert(detectPasteScenario(ctx(R`x \frac{a}{b} 普通数学`)) === "ai-latex", "普通正文里的 \\frac 仍是数学");
+        assert(detectPasteScenario(ctx(R`\begin{aligned} a &= b \end{aligned}`)) === "ai-latex", "数学环境不会被当成 CSS 规则体");
         assert(plan(R`\frac{a}{b} 说明`).action === "fix", "AI 数学 smart → fix");
         assert(plan("普通一句话。").action === "pass", "散文 → pass");
         assert(plan(R`\frac{x}{y}`, "", "", true).action === "pass", "代码块目标 → pass（inCodeTarget 贯通）");

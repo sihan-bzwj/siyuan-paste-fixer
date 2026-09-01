@@ -133,12 +133,20 @@ export function detectPasteScenario(input: ScenarioInput): PasteScenario {
     return "mixed";
 }
 
-/** 计算修复后文本中的公式数量（提示文案用；行内计数复用 tokenizeInlineMath 的配对可靠性判定） */
+/** 计算修复后文本中的公式数量（提示文案用；统一扫描器口径：inline+block，允许跨行，跳过保护段） */
 export function countMathFormulas(markdown: string): number {
-    const blocks = (markdown.match(/\$\$[\s\S]+?\$\$/g) || []).length;
-    const rest = markdown.replace(/\$\$[\s\S]+?\$\$/g, "");
-    const inlines = tokenizeInlineMath(rest).filter((t) => t.math).length;
-    return blocks + inlines;
+    let count = 0;
+    for (const segment of splitMarkdownSegments(markdown)) {
+        if (segment.protected) {
+            continue;
+        }
+        for (const t of tokenizeMath(segment.text, {multiline: true})) {
+            if (t.kind !== "text") {
+                count++;
+            }
+        }
+    }
+    return count;
 }
 
 export interface PastePlanInput {
@@ -182,5 +190,5 @@ export function planPasteHandling(input: PastePlanInput): PastePlan {
 }
 
 // 避免循环依赖：hasMathML 与 looksLikeMath 在各自模块导出
-import { looksLikeMath, tokenizeInlineMath } from "./fix-latex";
+import { looksLikeMath, splitMarkdownSegments, tokenizeMath } from "./fix-latex";
 import { hasMathML } from "./mathml";

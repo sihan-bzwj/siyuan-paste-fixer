@@ -23,6 +23,22 @@ export interface PasteContextSnapshot {
 
 export const PASTE_CONTEXT_WINDOW_MS = 500;
 
+/** 代码目标判定：代码块 / 行内代码（官方 DOM 行内代码是 span[data-type="code"]，
+ *  历史形态 NodeInlineCode 兼容保留）。 */
+const CODE_TARGET_SELECTOR = '[data-type="NodeCodeBlock"], [data-type="NodeInlineCode"], [data-type="code"]';
+
+/** caret 是否落在代码目标内（paste 的 event.target 常是外层 contenteditable，
+ *  真正光标可能在内部的行内代码 span 上，两层都要查）。 */
+function selectionInCodeTarget(): boolean {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) {
+        return false;
+    }
+    const node = sel.getRangeAt(0).startContainer;
+    const el = node.nodeType === 1 ? node as Element : node.parentElement;
+    return el?.closest?.(CODE_TARGET_SELECTOR) !== null;
+}
+
 /** 捕获原生 paste 上下文；不在正文编辑器内或没有剪贴板数据时返回 null。 */
 export function capturePasteContext(
     event: {
@@ -38,9 +54,7 @@ export function capturePasteContext(
     if (!protyleElement || !event.clipboardData) {
         return null;
     }
-    const inCodeTarget = !!target.closest(
-        '[data-type="NodeCodeBlock"], [data-type="NodeInlineCode"]',
-    );
+    const inCodeTarget = !!target.closest(CODE_TARGET_SELECTOR) || selectionInCodeTarget();
     return {
         time: Date.now(),
         inCodeTarget,

@@ -19,15 +19,8 @@ function assert(cond, name, detail = "") {
     }
 }
 
-/** 与 index.ts 相同的还原实现（测试内联，避免建 Plugin 实例） */
-function convertToPlain(text) {
-    return text
-        .replace(/\$\$([\s\S]+?)\$\$/g, (_m, inner) => inner.trim())
-        .replace(/\$([^$\n\u0001\u0002]+?)\$/g, (_m, inner) => {
-            const core = inner.trim();
-            return /^\{.*\}$/.test(core) ? core.slice(1, -1) : core;
-        });
-}
+/** 与生产路径一致的还原（main 内注入 convertMathToPlainText，见下） */
+let convertToPlain = (text) => text;
 
 async function main() {
     await esbuild.build({
@@ -40,7 +33,8 @@ async function main() {
         bundle: true, format: "cjs", platform: "node",
         outfile: path.join(__dirname, "_manual-action.cjs"), logLevel: "silent",
     });
-    const { fixLatexText } = require("./_fix-latex.cjs");
+    const { convertMathToPlainText, fixLatexText } = require("./_fix-latex.cjs");
+    convertToPlain = convertMathToPlainText;
     const M = require("./_manual-action.cjs");
 
     const dom = new JSDOM("<!DOCTYPE html><body></body>", {url: "http://localhost/"});
@@ -144,24 +138,8 @@ async function main() {
         range.setEnd(b2.firstChild, 3);
         const ctx = M.captureManualContext(range, null);
         const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
-        assert(key === "noChange", "纯中文正文跨块不转换（looksNotMath 逐块跳过）", key);
+        assert(key === "crossBlockRefuse", "跨块拒绝（v0.2.5 撤回批处理：部分选择/Heading 语义风险）", key);
         assert(updateCalls.length === 0, "未触发 updateBlock");
-        document.body.innerHTML = "";
-
-        // 两块都是公式文本：逐块转换、保留各自 ID
-        updateCalls = [];
-        const e2 = mkEditor();
-        const m1 = mkBlock(e2, "m1", "x^2+y^2");
-        const m2 = mkBlock(e2, "m2", "\\frac{a}{b}");
-        const r2 = document.createRange();
-        r2.setStart(m1.firstChild, 0);
-        r2.setEnd(m2.firstChild, m2.firstChild.length);
-        const ctx2 = M.captureManualContext(r2, null);
-        const key2 = await M.runManualAction(ctx2, "fix", fixLatexText, convertToPlain);
-        assert(key2 === "done", "两块公式跨块批处理返回 done", key2);
-        assert(updateCalls.length === 2, "两块各自 updateBlock", String(updateCalls.length));
-        assert(updateCalls.map((c) => c.id).join(",") === "m1,m2", "各自的 block ID 保留", process.argv.length ? updateCalls.map((c) => c.id).join(",") : "");
-        assert(updateCalls[0].data === "$x^2+y^2$" && updateCalls[1].data === "$\\frac{a}{b}$", "各自包装为行内公式", JSON.stringify(updateCalls));
         document.body.innerHTML = "";
     }
 
@@ -368,6 +346,74 @@ async function main() {
         const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
         assert(key === "looksNotMath", "纯中文句子 → looksNotMath", key);
         assert(block.textContent === "这是一个普通中文句子", "DOM 原样未动");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 16. 强制转换信任用户：简单表达式直接转 ==");
+    {
+        for (const [label, src] of [["单个变量 x", "x"], ["函数 f(x)", "f(x)"], ["列表 a,b", "a,b"], ["数字 123", "123"], ["x_i", "x_i"], ["E=mc^2", "E=mc^2"]]) {
+            let updateCalls = [];
+            global.fetch = async (url, opts) => {
+                if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+                return {ok: true, json: async () => ({code: 0})};
+            };
+            const editor = mkEditor();
+            const block = mkBlock(editor, "bG" + label.length, src);
+            const range = selectRange(block, 0, block.firstChild.length);
+            const ctx = M.captureManualContext(range, null);
+            const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+            assert(key === "done" && updateCalls.length === 1, label + " → " + updateCalls[0]?.data, key);
+            assert(updateCalls[0].data === "$" + src + "$", label + " 包装为行内公式", updateCalls[0].data);
+            document.body.innerHTML = "";
+        }
+    }
+
+    console.log("== 17. 行内代码 span（data-type=code）语义节点：整块拒绝 ==");
+    {
+        let updateCalls = [];
+        global.fetch = async () => { updateCalls++; return {ok: true, json: async () => ({code: 0})}; };
+        const editor = mkEditor();
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "bH");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = '前 <span data-type="code">code</span> 后';
+        editor.appendChild(block);
+        const range = document.createRange();
+        range.setStart(block.firstChild, 0);
+        range.setEnd(block.lastChild, block.lastChild.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "blockRichRefuse", "行内代码 span 整块拒绝（不扁平化丢格式）", key);
+        assert(updateCalls.length === 0, "未触发 updateBlock");
+        assert(domeHtml(block).includes('data-type="code"'), "DOM 原样未动");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 18. 局部跨 <br>：inline-math span 保留换行 ==");
+    {
+        let updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(1);
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "bI");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = "P x^2<br>+ y^2 Q";
+        editor.appendChild(block);
+        // 只选 "x^2<br>+ y^2"（第一文本 2..末，第二文本到 "+ y^2" 结束）
+        const first = block.firstChild;
+        const range = document.createRange();
+        range.setStart(first, 2);
+        range.setEnd(block.childNodes[2], 4);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "done", "局部跨 <br> 转换返回 done（不再要求选整段）", key);
+        const span = block.querySelector('[data-type="inline-math"]');
+        assert(span !== null && (span.getAttribute("data-content") || "").includes("\n"),
+            "生成 inline-math span 且 data-content 保留换行", span && JSON.stringify(span.getAttribute("data-content")));
+        assert(updateCalls.length === 0, "未走 updateBlock（局部原地替换）");
         document.body.innerHTML = "";
     }
 

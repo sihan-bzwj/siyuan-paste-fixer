@@ -125,8 +125,9 @@ export function captureManualContext(range: Range, protyle: unknown): ManualCont
 }
 
 /**
- * 安全序列化：只允许 文本/br/inline-math/公式块/纯容器，遇到白名单外元素返回 null。
- * 与整块富格式保护同口径，保证手动操作永远不丢语义节点；<br> 还原为 \n。
+ * 安全序列化：只允许无语义标记的文本/纯容器 + 明确允许的数学节点。
+ * fail-closed——span[data-type="code"]、标签、块引用等一切带 data-type/data-subtype
+ * 的语义节点一律拒绝（返回 null），绝不扁平化丢格式。
  */
 function serializeSafeSelection(root: Node): string | null {
     if (root.nodeType === 3) {
@@ -157,6 +158,10 @@ function serializeSafeSelection(root: Node): string | null {
     if (el.getAttribute("data-type") === "NodeMathBlock") {
         return "$$\n" + (el.getAttribute("data-content") || "") + "\n$$";
     }
+    // 其余带语义标记的节点（行内代码/标签/引用/未来插件节点）一律拒绝
+    if (el.hasAttribute("data-type") || el.hasAttribute("data-subtype")) {
+        return null;
+    }
     if (tag === "div" || tag === "span" || tag === "p") {
         let out = "";
         for (const child of el.childNodes) {
@@ -168,7 +173,7 @@ function serializeSafeSelection(root: Node): string | null {
         }
         return out;
     }
-    return null; // 白名单之外的一切语义元素：拒绝
+    return null; // 其它元素（img/a/code/strong/...）一律拒绝
 }
 
 /** 片段是否含“有效内容”（整块判定用）：非空文本、思源语义节点、图像/链接等
@@ -248,6 +253,10 @@ function hasUnsafeRichElement(node: Node): boolean {
     if (el.getAttribute("data-type") === "inline-math") {
         return false;
     }
+    // 任一 data-type/data-subtype（行内代码/标签/引用等语义节点）→ 拒绝
+    if (el.hasAttribute("data-type") || el.hasAttribute("data-subtype")) {
+        return true;
+    }
     const tag = el.tagName.toLowerCase();
     if (tag === "br") {
         return false; // 多行段落：serialize 会还原为 \n
@@ -311,38 +320,29 @@ export function applyLocalFragment(
 }
 
 /**
- * 手动强制转换前的轻量保护：选中内容是否像公式表达式。
- * 只用于用户明确表达“这就是公式”的场景，不参与自动粘贴分类：
- * - 已有公式定界符 / LaTeX 命令 / 数学运算符 → 接受；
- * - 纯中文句子、纯普通英文句子 → 拒绝；
- * - 中文与数学符号混合（如 \text{核} x_1）→ 接受。
+ * 手动强制转换前的轻量保护：信任用户的明确意图（按钮叫「强制转换为公式」）。
+ * 只拒绝空选择与纯中文/全角句子（无任何数学信号，防误点）；x、f(x)、a,b、123
+ * 等简单表达式直接放行。
  */
 export function looksLikeRawMathExpression(source: string): boolean {
     const t = source.trim();
     if (!t) {
         return false;
     }
-    if (/\$\$|\\\[|\\\]|\\\(|\\\)|\\begin\{/.test(t)) {
-        return true;
+    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(t) &&
+        !/\\[A-Za-z]+|[_^=+*/<>≤≥×÷]/.test(t)) {
+        return false; // 纯中文句子（无数学信号）
     }
-    if (/\\[A-Za-z]+/.test(t)) {
-        return true;
-    }
-    if (/[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]/.test(t)) {
-        return true;
-    }
-    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(t)) {
-        return false; // 无数学信号的纯中文句子：拒绝
-    }
-    return false;
+    return true;
 }
 
 /**
  * 手动「强制转换为公式」：
  * 1. 先复用修复引擎清理破损（\[...\]、\(...\)、== 碎片、\rightarrowEdge 等）；
  * 2. 修复结果若已含可靠数学对（内容=公式+正文混合，如 "A $x$ B"）→ 直接使用修复结果，
- *    不整体包装（避免嵌套 $...$）；此时输出**保留原输入（含两侧空格）**，局部选区不丢空格；
+ *    不整体包装（避免嵌套 $...$）；此时输出**保留原输入（含两侧空格）**；
  * 3. 否则把整段内容包装：单行 → $...$，多行 → $$...$$；已是完整公式对则原样。
+ *    包装分支保留源码两侧空白（局部 "A x B" 选 " x " → " $x$ "，空格不丢）。
  * 返回 null 表示“选中内容不像公式”。
  */
 export function forceConvertMath(source: string, fixText: (md: string) => string): string | null {
@@ -350,18 +350,21 @@ export function forceConvertMath(source: string, fixText: (md: string) => string
         return null;
     }
     const fixed = fixText(source);
-    const t = fixed.trim();
-    if (!t) {
+    const trimmed = fixed.trim();
+    if (!trimmed) {
         return null;
     }
     // 混合内容（修复后含可靠数学对）：保持修复结果（原文姿态，空格不丢）
     if (scanDollarMath(fixed, {multiline: true}).length > 0) {
         return fixed;
     }
-    if (t.includes("\n")) {
-        return /^\$\$[\s\S]+\$\$$/.test(t) ? fixed : "$$\n" + t + "\n$$";
+    // 包装分支：源码两侧空白由调用方决定保留（局部保留、整块 trim）
+    const leading = fixed.slice(0, fixed.length - fixed.trimStart().length);
+    const trailing = fixed.slice(fixed.trimEnd().length);
+    if (trimmed.includes("\n")) {
+        return leading + (/^\$\$[\s\S]+\$\$$/.test(trimmed) ? trimmed : "$$\n" + trimmed + "\n$$") + trailing;
     }
-    return /^\$[^$\n]+\$$/.test(t) ? fixed : "$" + t + "$";
+    return leading + (/^\$[^$\n]+\$$/.test(trimmed) ? trimmed : "$" + trimmed + "$") + trailing;
 }
 
 /** 完整单块：内核 updateBlock（保留原 block ID，不删除重建）。 */
@@ -387,70 +390,14 @@ export async function applyWholeBlock(
     }
 }
 
-/** 块 → 源码（公式块读 data-content；普通块走安全序列化，<br>→\n）。 */
+/** 块 → 源码：公式块读 data-content；普通块只序列化正文 editable 子树
+ *  （排除 .protyle-attr 等编辑器结构）。 */
 function blockSource(block: HTMLElement): string {
     if (block.getAttribute("data-type") === "NodeMathBlock") {
         return "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
     }
-    return serializeSafeSelection(block) ?? "";
-}
-
-/** 被 range 覆盖的叶子块列表（无子块的 [data-node-id]；跨块批处理用）。 */
-function collectIntersectingLeafBlocks(range: Range): HTMLElement[] {
-    const startEl = range.startContainer.nodeType === 1
-        ? range.startContainer as Element
-        : (range.startContainer.parentElement as Element | null);
-    const scope = (startEl?.closest?.(".protyle-wysiwyg") as HTMLElement | null) || document.body;
-    return Array.from(scope.querySelectorAll("[data-node-id]"))
-        .filter((el) => !el.querySelector("[data-node-id]") && range.intersectsNode(el)) as HTMLElement[];
-}
-
-/**
- * 跨块批处理：每块独立转换、独立 updateBlock（保留各自 block ID）。
- * 不再一刀切拒绝；含富格式的块跳过，全块不转换时返回对应提示。
- */
-async function convertBlocks(
-    range: Range,
-    action: "fix" | "revert",
-    fixText: (md: string) => string,
-    convertToPlain: (md: string) => string,
-): Promise<string> {
-    const blocks = collectIntersectingLeafBlocks(range);
-    if (!blocks.length) {
-        return "noSelection";
-    }
-    let changed = 0;
-    let refused = 0;
-    for (const b of blocks) {
-        if (hasRichFormatting(b)) {
-            refused++;
-            continue;
-        }
-        const source = blockSource(b);
-        const trimmed = source.trim();
-        if (!trimmed) {
-            continue;
-        }
-        if (action === "revert") {
-            const out = convertToPlain(source);
-            if (out === source) {
-                continue;
-            }
-            await applyWholeBlock(b, out);
-            changed++;
-        } else {
-            const out = forceConvertMath(source, fixText);
-            if (out === null || out === source) {
-                continue;
-            }
-            await applyWholeBlock(b, out);
-            changed++;
-        }
-    }
-    if (changed === 0 && refused > 0) {
-        return "blockRichRefuse";
-    }
-    return changed > 0 ? "done" : "noChange";
+    const editable = block.querySelector('[contenteditable="true"]') as HTMLElement | null;
+    return serializeSafeSelection(editable ?? block) ?? "";
 }
 
 /**
@@ -509,9 +456,11 @@ export async function runManualAction(
     if (kind === "collapsed-text" || kind === "none") {
         return "noSelection";
     }
-    // 跨块：逐块批处理（每块保留自己的 block ID）
+    // 跨块：拒绝（v0.2.5 撤回批处理——跨块“部分选择”会改写整个首尾块、
+    // 可能把 Heading/CodeBlock 改成普通块，数据作用域不安全；后续如需
+    // 支持，须按 Range∩每块交集预计算后再写入）
     if (kind === "cross-block") {
-        return convertBlocks(ctx.range, action, fixText, convertToPlain);
+        return "crossBlockRefuse";
     }
     // 完整块含白名单外元素：宁可拒绝，也不静默丢格式
     if (kind === "whole-block" && hasRichFormatting(ctx.block)) {
@@ -556,8 +505,19 @@ export async function runManualAction(
         await applyWholeBlock(ctx.block!, out);
         return "done";
     }
+    // 局部多行（<br>）：force 把整段包成 $$...$$——用 inline-math span 保留换行
+    // （data-content 可含 \n，KaTeX 行内渲染），不再要求选整段
+    if (/^\$\$\n?[\s\S]+?\n?\$\$$/.test(out)) {
+        const content = out.slice(2, -2).trim();
+        ctx.range.deleteContents();
+        const span = buildInlineMathElement(content);
+        ctx.range.insertNode(span);
+        removeEmptySplitTail(span);
+        commitEditorChange(ctx.protyleElement);
+        return "done";
+    }
     if (/\$\$/.test(out)) {
-        return "blockNeedsWholeBlock"; // 局部选中出现块级公式：提示选整段
+        return "blockNeedsWholeBlock"; // 混合内容中真带块级公式：仍提示选整段
     }
     // 局部行内：整段结果（文本+公式）片段替换
     applyLocalFragment(ctx.range, tokenizeMath(out), ctx.protyleElement);

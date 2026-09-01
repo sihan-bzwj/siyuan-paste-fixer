@@ -90,6 +90,44 @@ async function main() {
         assert(consumePasteContext(null, Date.now()) === null, "无快照返回 null");
     }
 
+    console.log("== 2b. 行内代码目标：span[data-type=code] + caret 位置检测 ==");
+    {
+        const editor = document.createElement("div");
+        editor.className = "protyle-wysiwyg";
+        document.body.appendChild(editor);
+        // 官方真实 DOM：行内代码是 span[data-type="code"]（非 NodeInlineCode）
+        const codeSpan = document.createElement("span");
+        codeSpan.setAttribute("data-type", "code");
+        codeSpan.textContent = "x_i";
+        editor.appendChild(codeSpan);
+        const snap = capturePasteContext({
+            target: codeSpan,
+            clipboardData: {files: [], getData: () => "const x = $\\frac{a}{b}$;"},
+        });
+        assert(snap !== null && snap.inCodeTarget === true, "span[data-type=code] 目标识别为代码", JSON.stringify(snap));
+
+        // caret 在行内代码内、event.target 是外层 contenteditable（真实存在形态）
+        const outer = document.createElement("div");
+        outer.setAttribute("contenteditable", "true");
+        editor.appendChild(outer); // 外层必须仍在 .protyle-wysiwyg 内
+        const codeSpan2 = document.createElement("span");
+        codeSpan2.setAttribute("data-type", "code");
+        codeSpan2.textContent = "y";
+        outer.appendChild(codeSpan2);
+        const range = document.createRange();
+        range.setStart(codeSpan2.firstChild, 1);
+        range.collapse(true);
+        const sel = dom.window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        const snap2 = capturePasteContext({
+            target: outer, // event.target 是外层，光标在内层 code span
+            clipboardData: {files: [], getData: () => "z"},
+        });
+        assert(snap2 !== null && snap2.inCodeTarget === true, "caret 在 code span 内（target 为外层）也识别", JSON.stringify(snap2));
+        document.body.innerHTML = "";
+    }
+
     console.log("== 3. 代码块目标 + LaTeX 内容：一律 code-target 放行 ==");
     {
         const s = detectPasteScenario({textPlain: R`const x = "\frac{a}{b}";`, textHTML: "", siyuanHTML: "", inCodeTarget: true});
