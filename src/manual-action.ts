@@ -489,12 +489,9 @@ function collectCoveredMathNodes(
     // 扩大到共同祖先（不再每次右键扫整个编辑器）
     const ancestor = range.commonAncestorContainer;
     const rootEl = (ancestor.nodeType === 1 ? ancestor : ancestor.parentElement) as Element | null;
-    const walker = document.createTreeWalker(rootEl ?? document.body, NodeFilter.SHOW_ELEMENT);
     const inline: Element[] = [];
     const blocks: Array<{id: string, content: string}> = [];
-    let node: Node | null = walker.nextNode();
-    while (node) {
-        const el = node as Element;
+    const visit = (el: Element): void => {
         const dt = el.getAttribute("data-type");
         if ((dt === "inline-math" || dt === "NodeMathBlock") && nodeFullyCovered(el, range)) {
             if (!el.closest?.(CODE_TARGET_SELECTOR)) {
@@ -508,6 +505,16 @@ function collectCoveredMathNodes(
                 }
             }
         }
+    };
+    // TreeWalker.nextNode() 从 root 的子节点开始：root 自身（如整块 NodeMathBlock
+    // 的 commonAncestorContainer）必须先单独检查，否则会漏掉
+    if (rootEl) {
+        visit(rootEl);
+    }
+    const walker = document.createTreeWalker(rootEl ?? document.body, NodeFilter.SHOW_ELEMENT);
+    let node: Node | null = walker.nextNode();
+    while (node) {
+        visit(node as Element);
         node = walker.nextNode();
     }
     return {inline, blocks};
@@ -614,7 +621,7 @@ export function getManualCapabilities(ctx: ManualContext): ManualCapabilities {
         const at = collapsedAtMath(ctx.range);
         return {
             canFix: false,
-            fixReason: "alreadyMath",
+            fixReason: at !== null ? "alreadyMath" : "noSelection",
             canRevert: at !== null,
             revertReason: at === null ? "noSelection" : undefined,
         };

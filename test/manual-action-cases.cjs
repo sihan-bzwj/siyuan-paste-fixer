@@ -686,6 +686,58 @@ async function main() {
         document.body.innerHTML = "";
     }
 
+    console.log("== 28. 真实公式块形态（含 spin 子节点）：commonAncestor=块自身也不漏检 ==");
+    {
+        let updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        // 官方真实 NodeMathBlock 带子节点（spin div）；range 覆盖块内容（非 collapsed）
+        const mb = document.createElement("div");
+        mb.setAttribute("data-node-id", "mbS");
+        mb.setAttribute("data-type", "NodeMathBlock");
+        mb.innerHTML = '<div spin="1"></div>';
+        mb.setAttribute("data-content", "* x");
+        editor.appendChild(mb);
+        const range = document.createRange();
+        range.setStart(mb, 0);
+        range.setEnd(mb, mb.childNodes.length); // 1（spin div）→ 非 collapsed
+        assert(range.collapsed === false, "range 非 collapsed（真实全选形态）");
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "带子节点的公式块全选还原返回 revertDone", key);
+        assert(updateCalls.length === 1 && updateCalls[0].id === "mbS" && updateCalls[0].dataType === "dom" &&
+            updateCalls[0].data.includes("* x"),
+            "走 dom 字面还原（不经 Markdown——commonAncestor=块自身不漏检）", JSON.stringify(updateCalls[0]));
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 29. inline-math 自身作 commonAncestorContainer：完整选中仍能还原 ==");
+    {
+        const editor = mkEditor();
+        const span = document.createElement("span");
+        span.setAttribute("data-type", "inline-math");
+        span.setAttribute("data-subtype", "math");
+        span.setAttribute("data-content", "y_i");
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "ia1");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.appendChild(span);
+        editor.appendChild(block);
+        // range 覆盖 span 自身：commonAncestorContainer === span
+        const range = document.createRange();
+        range.setStart(block, 0);
+        range.setEnd(block, block.childNodes.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "inline-math 作为公共祖先时仍节点级还原", key);
+        assert(block.querySelector('[data-type="inline-math"]') === null, "公式已还原为纯文本");
+        assert(block.textContent.includes("y_i"), "内容保留");
+        document.body.innerHTML = "";
+    }
+
     console.log(`\n手动转换测试: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }
