@@ -13,7 +13,7 @@
  * 菜单复用时不会残留空分隔线。手动动作一律使用右键事件的 range 快照。
  */
 
-import { captureManualContext, collapsedAtMath, isCodeRange, ManualContext, runManualAction } from "./manual-action";
+import { captureManualContext, getManualCapabilities, ManualContext, runManualAction } from "./manual-action";
 
 export interface MenuDeps {
     i18n: Record<string, string>;
@@ -29,35 +29,16 @@ const MENU_INTERACTION_ATTR = "data-paste-fixer-interaction";
 /** 末班车窗口：事件通路晚于此时仍未处理，直接注入当前可见菜单 */
 const FALLBACK_WINDOW_MS = 500;
 
-/** 选区是否覆盖渲染后的公式节点（决定是否提供“还原为纯文本”）。 */
-function rangeContainsMath(range: Range): boolean {
-    const container = document.createElement("div");
-    container.appendChild(range.cloneContents());
-    return !!container.querySelector('[data-type="inline-math"], [data-type="NodeMathBlock"]');
-}
-
 /**
- * 菜单项按上下文显示（与手动动作的语义/边界完全一致）：
- * - 代码区域（代码块/行内代码）→ 不显示任何公式操作（issue #1 硬边界）；
- * - 光标在公式内 → 只「还原为纯文本」；
- * - 普通文字且无选择 → 不显示；
- * - 跨块选区 → 不显示「强制转换」（整块语义无法保证）；选区覆盖公式节点时
- *   显示「还原为纯文本」（节点级还原安全）；
- * - 单块有选区 → 「强制转换为公式」；选区覆盖公式节点时再加「还原为纯文本」。
+ * 菜单项按上下文显示——与 runManualAction 共用 getManualCapabilities（同源，
+ * 避免“菜单能点、执行又拒绝”的分叉）：
+ * - 代码区域/无选区/普通文字 → 不显示；
+ * - 有选区 → 「强制转换为公式」；
+ * - 节点级可还原（完整覆盖的渲染公式）→ 加「还原为纯文本」。
  */
 function menuActionsFor(ctx: ManualContext): {fix: boolean, revert: boolean} {
-    if (isCodeRange(ctx.range)) {
-        return {fix: false, revert: false};
-    }
-    if (ctx.range.collapsed) {
-        return collapsedAtMath(ctx.range) ? {fix: false, revert: true} : {fix: false, revert: false};
-    }
-    const hasMath = rangeContainsMath(ctx.range);
-    // 跨块：只允许节点级还原
-    if (ctx.block !== ctx.endBlock) {
-        return {fix: false, revert: hasMath};
-    }
-    return {fix: true, revert: hasMath};
+    const caps = getManualCapabilities(ctx);
+    return {fix: caps.canFix, revert: caps.canRevert};
 }
 
 export interface MenuHandlers {

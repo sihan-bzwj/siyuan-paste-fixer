@@ -23,7 +23,7 @@ async function main() {
         external: ["mathml2latex"],
         outfile: path.join(__dirname, "_scenario.cjs"), logLevel: "silent",
     });
-    const { detectPasteScenario, looksLikeCode, countMathFormulas, DEFAULT_POLICY, planPasteHandling, hasComplexRichHTML } = require("./_scenario.cjs");
+    const { detectPasteScenario, looksLikeCode, countMathFormulas, DEFAULT_POLICY, planPasteHandling, hasComplexRichHTML, decidePasteHandling } = require("./_scenario.cjs");
     const ctx = (plain = "", html = "", sy = "", inCode = false) => ({textPlain: plain, textHTML: html, siyuanHTML: sy, inCodeTarget: inCode});
     const R = String.raw;
 
@@ -105,6 +105,17 @@ async function main() {
         assert(hasComplexRichHTML("<table><tr><td>1</td></tr></table>") === true, "表格判为复杂结构");
         assert(hasComplexRichHTML("<p>普通段落 <strong>加粗</strong></p>") === false, "简单行内格式不算复杂结构");
         assert(hasComplexRichHTML("<p>纯文本</p>") === false, "纯段落不拦");
+        assert(detectPasteScenario(ctx("```latex\n\\frac{x}{y}\n```\n正文 $z$")) === "mixed", "fence 内 \\frac 不强判 ai-latex（只按外部 $z$ 判定）");
+        // 粘贴编排顺序：附件 → plan pass → 复杂富文本 → 修复管线
+        const richHtml = '<p>看 <a href="https://example.com">这里</a></p>';
+        const d1 = decidePasteHandling({textPlain: "$$x$$", textHTML: richHtml, siyuanHTML: "", inCodeTarget: false, hasFiles: true, getPolicy: () => "smart"});
+        assert(d1.kind === "passthrough" && d1.reason === "files", "附件优先放行（不改 payload）", JSON.stringify(d1));
+        const d2 = decidePasteHandling({textPlain: "$$x$$", textHTML: richHtml, siyuanHTML: "", inCodeTarget: false, hasFiles: false, getPolicy: () => "smart"});
+        assert(d2.kind === "passthrough" && d2.reason === "rich", "P0：$$ 快路径不能绕过复杂富文本保护", JSON.stringify(d2));
+        const d3 = decidePasteHandling({textPlain: "$$x$$", textHTML: "<p>纯文本</p>", siyuanHTML: "", inCodeTarget: false, hasFiles: false, getPolicy: () => "smart"});
+        assert(d3.kind === "fix", "无复杂结构进入修复管线", JSON.stringify(d3));
+        const d4 = decidePasteHandling({textPlain: "普通一句话", textHTML: richHtml, siyuanHTML: "", inCodeTarget: false, hasFiles: false, getPolicy: () => "smart"});
+        assert(d4.kind === "passthrough" && d4.reason === "plan-pass", "散文 pass 早于富文本检查", JSON.stringify(d4));
         assert(detectPasteScenario(ctx("今天已经完成 80%")) === "plain-prose", "单个弱特征（80%）不是代码");
         assert(detectPasteScenario(ctx(R`const x = "\frac{a}{b}";`)) === "code-content", "代码字符串里的 \\frac 仍是代码");
         assert(detectPasteScenario(ctx(R`$font-size: 14px; body { font-size: $font-size; }`)) === "code-content", "SCSS 变量行是代码");

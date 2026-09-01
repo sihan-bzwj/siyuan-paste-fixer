@@ -10,9 +10,8 @@ import {selectClipboardMarkdown} from "./clipboard";
 import {
     countMathFormulas,
     DEFAULT_POLICY,
-    hasComplexRichHTML,
+    decidePasteHandling,
     PasteScenario,
-    planPasteHandling,
     ScenarioPolicy,
 } from "./scenario";
 import {hasMathML} from "./mathml";
@@ -54,7 +53,7 @@ export default class PasteFixer extends Plugin {
                 return;
             }
             const range = sel.getRangeAt(0);
-            if (range.startContainer && deriveProtyleElement(range)) {
+            if (range.startContainer?.isConnected && deriveProtyleElement(range)) {
                 this.lastEditorRange = range.cloneRange();
             }
         } catch (e) {
@@ -71,36 +70,32 @@ export default class PasteFixer extends Plugin {
             const textPlain = detail.textPlain || "";
             const siyuanHTML = detail.siyuanHTML || "";
             const files = detail.files;
-            // 复杂富文本结构：链接/图片/表格/列表/标题/引用（重写会丢结构 → fail-closed 原样）
-            const complexRichHTML = hasComplexRichHTML(textHTML);
 
             // 消费原生 paste 快照（代码块目标信息事件总线无法自行感知；带指纹校验）
             const snap = consumePasteContext(this.pasteSnapshot, Date.now(), {textPlain, textHTML});
             this.pasteSnapshot = null;
 
-            // 携带文件：插件整体放行，不参与任何修复
-            const hasFiles = !!snap?.hasFiles || (!!files && files.length > 0);
-            if (hasFiles) {
-                resolve(detail);
-                return;
-            }
-
-            const plan = planPasteHandling({
+            // 统一决策（顺序契约：附件 → 场景 pass → 复杂富文本 → 修复管线；
+            // 复杂富文本在一切 payload 重写之前生效，$$ 快路径不得绕过）
+            const handling = decidePasteHandling({
                 textPlain,
                 textHTML,
                 siyuanHTML,
                 inCodeTarget: !!snap?.inCodeTarget,
+                hasFiles: !!snap?.hasFiles || (!!files && files.length > 0),
                 getPolicy: (s) => this.scenarioPolicy(s),
             });
-            if (plan.action === "pass") {
-                if (plan.hint) {
+            if (handling.kind === "passthrough") {
+                if (handling.reason === "rich") {
+                    this.maybeHintRich();
+                } else if (handling.plan.hint) {
                     // 代码内容/pass 策略：原样粘贴 + 提示可用右键修复
-                    this.maybeHint(plan.scenario, 0);
+                    this.maybeHint(handling.plan.scenario, 0);
                 }
                 resolve(detail);
                 return;
             }
-            const scenario = plan.scenario;
+            const scenario = handling.plan.scenario;
 
             const decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
             const fixed = decision?.markdown ?? null;
@@ -126,14 +121,6 @@ export default class PasteFixer extends Plugin {
 
             if (fixed === null) {
                 this.maybeHint(scenario, countMathFormulas(plain));
-                resolve(detail);
-                return;
-            }
-
-            // 复杂富文本（链接/图片/表格/列表/标题/引用）无法无损重写：
-            // 原样粘贴 + 提示可右键强制转换——绝不为了公式丢结构（Issue #1 范围契约）
-            if (complexRichHTML) {
-                this.maybeHintRich();
                 resolve(detail);
                 return;
             }
@@ -308,7 +295,9 @@ export default class PasteFixer extends Plugin {
                     return captureManualContext(range, null);
                 }
             }
-            if (this.lastEditorRange) {
+            if (this.lastEditorRange &&
+                this.lastEditorRange.startContainer.isConnected &&
+                deriveProtyleElement(this.lastEditorRange)) {
                 return captureManualContext(this.lastEditorRange, null);
             }
         } catch (e) {

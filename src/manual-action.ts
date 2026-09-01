@@ -1,19 +1,21 @@
 /**
- * 手动转换动作层（v0.2.4 语义重做）。
+ * 手动转换动作层（v0.2.7 语义收敛）。
  *
  * 与自动粘贴的分工：
  * - 自动粘贴 → 保守、智能判断，宁可漏掉不乱改；
  * - 手动操作 → 用户明确表达意图：
  *   「强制转换为公式」把选中内容包装为公式（先复用修复引擎清破损，单行 → $...$，
  *   多行 → $$...$$；含可靠数学对的内容保持修复结果，不整体包装）；
- *   「还原为纯文本」去掉公式定界符。
+ *   「还原为纯文本」优先节点级：只还原完全覆盖的渲染公式节点（inline-math 原地
+ *   替换、公式块按 id 更新），其余结构（<br>/加粗/链接/代码）天然保持；无渲染
+ *   公式的纯源码选区才走文本路径（\n 还原为 <br>）。
  *
  * 安全原则：
+ * - 代码区域（代码块/行内代码）是硬边界：fix 一律拒绝、命令面板拒绝；
+ *   revert 仅当端点本身在代码内才拒绝（选区含代码则跳过代码、仍还原其它公式）；
  * - 局部选中：结果整段解析成 文本+公式 片段一次性原地替换，正文绝不丢失；
- * - 完整单块：内核 updateBlock（保留原 block ID）；白名单外元素（加粗/链接/
- *   行内代码/未知语义节点）一律拒绝，绝不静默丢格式；
- * - 跨块：逐块批处理——每块独立 updateBlock、保留各自 block ID，不再一刀切拒绝；
- * - 多行段落（<br>）经 serializeSafeSelection 还原为 \n，不再丢换行；
+ * - 完整单块：updateBlock（保留原 block ID）仅限 NodeParagraph/NodeMathBlock，
+ *   Heading/CodeBlock/未知块拒绝整块写回（防块类型被意外改写）；
  * - 编辑器从 range 推导（分屏不会发给错误编辑器）。
  */
 
@@ -109,23 +111,29 @@ export function deriveProtyleElement(range: Range): HTMLElement | null {
 /** 代码目标选择器：代码块 / 行内代码（官方 DOM 为 span[data-type="code"]）。 */
 export const CODE_TARGET_SELECTOR = '[data-type="NodeCodeBlock"], [data-type="NodeInlineCode"], [data-type="code"]';
 
-/**
- * 统一代码边界门禁：任意操作源（自动 paste / 右键菜单 / 命令面板）只要触及
- * 代码块/行内代码就整体排除——issue #1 的“限制插件功能范围”硬边界。
- * 检查 range 首尾容器 + 选中内容里出现的代码节点（code span 可能落在选区中间）。
- * 返回 true 表示该 range 落在代码区域内，插件不参与。
- */
-export function isCodeRange(range: Range): boolean {
+/** range 端点（start/end 容器）是否落在代码区域内。 */
+function rangeEndpointsInCode(range: Range): boolean {
     const check = (node: Node): boolean => {
         const el = node.nodeType === 1 ? node as Element : node.parentElement;
         return el?.closest?.(CODE_TARGET_SELECTOR) !== null;
     };
-    if (check(range.startContainer) || check(range.endContainer)) {
-        return true;
-    }
+    return check(range.startContainer) || check(range.endContainer);
+}
+
+/** 选中内容里是否出现代码节点（code span 可能落在选区中间）。 */
+function rangeContainsCode(range: Range): boolean {
     const container = document.createElement("div");
     container.appendChild(range.cloneContents());
     return container.querySelector(CODE_TARGET_SELECTOR) !== null;
+}
+
+/**
+ * 统一代码边界门禁：任意操作源（自动 paste / 右键菜单 / 命令面板）只要触及
+ * 代码块/行内代码就整体排除——issue #1 的“限制插件功能范围”硬边界。
+ * 返回 true 表示该 range 落在代码区域内，插件不参与。
+ */
+export function isCodeRange(range: Range): boolean {
+    return rangeEndpointsInCode(range) || rangeContainsCode(range);
 }
 
 /** 块正文根（editable 子树）：安全检查与源码提取统一只看这里，排除 .protyle-attr 等编辑器结构。 */
@@ -458,7 +466,7 @@ export function extractSourceMarkdown(
 }
 
 /**
- * 节点是否被 range 完整包含（跨块节点级还原的判定：只处理完整选中的公式节点，
+ * 节点是否被 range 完整覆盖（节点级还原的判定：只处理完整选中的公式节点，
  * 普通文字/块结构绝不触碰）。
  */
 function nodeFullyCovered(node: Node, range: Range): boolean {
@@ -473,57 +481,141 @@ function nodeFullyCovered(node: Node, range: Range): boolean {
         range.compareBoundaryPoints(2, nodeRange) >= 0;
 }
 
-/**
- * 跨块「还原为纯文本」：节点级操作——
- * - inline-math span → 原地替换为纯文本（不重建块、不动 block ID）；
- * - NodeMathBlock → 只还原该公式块（updateBlock 转回文本段落）；
- * - 普通文字/Heading/代码等 → 完全不碰。
- * 返回 "revertDone" / "noChange"。
- */
-async function revertMathNodesInRange(
-    ctx: ManualContext,
-    convertToPlain: (md: string) => string,
-): Promise<string> {
-    const startEl = ctx.range.startContainer.nodeType === 1
-        ? ctx.range.startContainer as Element
-        : (ctx.range.startContainer.parentElement as Element | null);
+/** 被 range 完整覆盖的公式节点（跳过代码区域内的节点；收集与执行分离）。 */
+function collectCoveredMathNodes(
+    range: Range,
+): {inline: Element[], blocks: Array<{id: string, content: string}>} {
+    const startEl = range.startContainer.nodeType === 1
+        ? range.startContainer as Element
+        : (range.startContainer.parentElement as Element | null);
     const scope = startEl?.closest?.(".protyle-wysiwyg") as HTMLElement | null;
-    // 先完整收集再处理：TreeWalker 在 DOM 修改后继续遍历会跳过后续节点
-    const targets: Array<{el: Element, kind: "inline" | "block"}> = [];
     const walker = document.createTreeWalker(scope ?? document.body, NodeFilter.SHOW_ELEMENT);
+    const inline: Element[] = [];
+    const blocks: Array<{id: string, content: string}> = [];
     let node: Node | null = walker.nextNode();
     while (node) {
         const el = node as Element;
         const dt = el.getAttribute("data-type");
-        if ((dt === "inline-math" || dt === "NodeMathBlock") && nodeFullyCovered(el, ctx.range)) {
-            targets.push({el, kind: dt === "inline-math" ? "inline" : "block"});
+        if ((dt === "inline-math" || dt === "NodeMathBlock") && nodeFullyCovered(el, range)) {
+            if (!el.closest?.(CODE_TARGET_SELECTOR)) {
+                if (dt === "inline-math") {
+                    inline.push(el);
+                } else {
+                    blocks.push({
+                        id: el.getAttribute("data-node-id") || "",
+                        content: el.getAttribute("data-content") || "",
+                    });
+                }
+            }
         }
         node = walker.nextNode();
     }
-    let reverted = 0;
-    for (const {el, kind} of targets) {
-        if (kind === "inline") {
-            const content = el.getAttribute("data-content") || "";
-            el.replaceWith(document.createTextNode(convertToPlain("$" + content + "$")));
-            reverted++;
-        } else {
-            await applyWholeBlock(el as HTMLElement, convertToPlain("$$\n" + (el.getAttribute("data-content") || "") + "\n$$"));
-            reverted++;
+    return {inline, blocks};
+}
+
+/**
+ * 节点级还原（跨块/局部/整段统一入口）：
+ * - inline-math：原地替换为纯文本（DOM 修改），有变更才派发一次 input；
+ * - NodeMathBlock：按块 id 走内核 updateBlock（转回文本段落），API 路径不再
+ *   派发 input（避免与前端自动保存竞争）；id/content 在 await 前固化为数据，
+ *   不依赖可能被内核重新渲染替换的 DOM 引用。
+ * 只还原完全覆盖的渲染公式；<br>/加粗/链接/代码等其他结构完全不碰。
+ * 返回 "revertDone" / "noChange"。
+ */
+async function revertCoveredMathNodes(
+    ctx: ManualContext,
+    convertToPlain: (md: string) => string,
+): Promise<string> {
+    const {inline, blocks} = collectCoveredMathNodes(ctx.range);
+    if (!inline.length && !blocks.length) {
+        return "noChange";
+    }
+    let inlineChanged = 0;
+    for (const el of inline) {
+        const content = el.getAttribute("data-content") || "";
+        el.replaceWith(document.createTextNode(convertToPlain("$" + content + "$")));
+        inlineChanged++;
+    }
+    if (inlineChanged > 0) {
+        commitEditorChange(ctx.protyleElement);
+    }
+    for (const b of blocks) {
+        await applyWholeBlockById(b.id, convertToPlain("$$\n" + b.content + "\n$$"));
+    }
+    return "revertDone";
+}
+
+/** 按块 id 更新（保 block ID；block 的 DOM 引用可能被内核重新渲染替换）。 */
+async function applyWholeBlockById(id: string, markdown: string): Promise<void> {
+    if (!id) {
+        throw new Error("block id missing");
+    }
+    const r = await fetch("/api/block/updateBlock", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({id, dataType: "markdown", data: markdown}),
+    });
+    if (!r.ok) {
+        throw new Error("updateBlock http " + r.status);
+    }
+    const j = await r.json() as {code: number, msg?: string};
+    if (j.code !== 0) {
+        throw new Error(j.msg || "updateBlock failed");
+    }
+}
+
+/**
+ * 手动动作能力判定（右键菜单与执行入口共用同一口径，避免“菜单能点、执行拒绝”分叉）。
+ * - fix：端点不在代码、非跨块、整块时块类型安全、选区有内容；
+ * - revert：存在被 range 完整覆盖的渲染公式节点（节点级还原路径）；
+ *   代码只跳过不阻塞；端点本身在代码内时整体拒绝。
+ * 富格式等深一级的拒绝仍由执行层兜底提示。
+ */
+export interface ManualCapabilities {
+    canFix: boolean;
+    canRevert: boolean;
+}
+
+export function getManualCapabilities(ctx: ManualContext): ManualCapabilities {
+    if (ctx.range.collapsed) {
+        const at = collapsedAtMath(ctx.range);
+        return {canFix: false, canRevert: at !== null};
+    }
+    // 端点本身在代码内：整体不参与
+    if (rangeEndpointsInCode(ctx.range)) {
+        return {canFix: false, canRevert: false};
+    }
+    const covered = collectCoveredMathNodes(ctx.range);
+    // fix：选区碰到任何代码 → 拒绝（与执行层 isCodeRange 同源）
+    if (rangeContainsCode(ctx.range)) {
+        return {canFix: false, canRevert: covered.inline.length > 0 || covered.blocks.length > 0};
+    }
+    if (ctx.block !== ctx.endBlock) {
+        // 跨块：fix 拒绝（整块语义无法保证）；revert 节点级安全（含代码跳过）
+        return {canFix: false, canRevert: covered.inline.length > 0 || covered.blocks.length > 0};
+    }
+    let canFix = true;
+    // 整块写回按块类型授权限
+    if (ctx.block !== null) {
+        const isWhole = !hasUnselectedContent(ctx.block, ctx.range);
+        if (isWhole && !wholeBlockAllowed(ctx.block)) {
+            canFix = false;
         }
     }
-    if (reverted > 0) {
-        commitEditorChange(ctx.protyleElement);
-        return "revertDone";
-    }
-    return "noChange";
+    return {
+        canFix,
+        canRevert: covered.inline.length > 0 || covered.blocks.length > 0,
+    };
 }
 
 /**
  * 统一手动动作入口：
  * - fix = 强制转换为公式（用户明确意图；先清破损再包装）；
- * - revert = 还原为纯文本（只还原可靠公式对，金额/Shell 美元不动）。
- * 代码区域（代码块/行内代码）是硬边界，任何动作都不参与；
- * 跨块：fix 拒绝（完整块语义无法保证），revert 允许（节点级、不动块结构）。
+ * - revert = 还原为纯文本：优先节点级（只还原完整覆盖的渲染公式节点，
+ *   <br>/加粗/链接/代码等结构天然保持）；无渲染公式的源码选区走文本路径
+ *   （\n 还原为 <br>，不压平结构）。
+ * 代码区域：fix 一律拒绝；revert 仅当端点本身在代码内才拒绝（选区含代码时
+ * 跳过代码、仍还原其它公式）。跨块：fix 拒绝（整块语义无法保证），revert 节点级。
  * 返回最终给用户的消息 key；失败抛错由调用方兜底提示。
  */
 export async function runManualAction(
@@ -532,8 +624,11 @@ export async function runManualAction(
     fixText: (md: string) => string,
     convertToPlain: (md: string) => string,
 ): Promise<string> {
-    // 代码区域硬边界：右键/命令/顶栏统一不参与（issue #1 范围契约）
-    if (isCodeRange(ctx.range)) {
+    // 代码区域硬边界：fix 一律拒绝；revert 仅端点本身在代码内才拒绝
+    if (action === "fix" && isCodeRange(ctx.range)) {
+        return "inCodeRange";
+    }
+    if (rangeEndpointsInCode(ctx.range)) {
         return "inCodeRange";
     }
     const kind = classifyRange(ctx.range, ctx.block, ctx.endBlock);
@@ -555,7 +650,8 @@ export async function runManualAction(
         }
         const block = node?.closest('[data-type="NodeMathBlock"]') as HTMLElement | null;
         if (block) {
-            await applyWholeBlock(block, convertToPlain("$$\n" + (block.getAttribute("data-content") || "") + "\n$$"));
+            await applyWholeBlockById(block.getAttribute("data-node-id") || "",
+                convertToPlain("$$\n" + (block.getAttribute("data-content") || "") + "\n$$"));
             return "revertDone";
         }
     }
@@ -567,7 +663,7 @@ export async function runManualAction(
         if (action === "fix") {
             return "crossBlockRefuse";
         }
-        return revertMathNodesInRange(ctx, convertToPlain);
+        return revertCoveredMathNodes(ctx, convertToPlain);
     }
     // 整块写回按块类型授权限（Heading/CodeBlock/未知块拒绝，防类型被意外改写）
     if (kind === "whole-block" && !wholeBlockAllowed(ctx.block)) {
@@ -576,6 +672,14 @@ export async function runManualAction(
     // 完整块含白名单外元素：宁可拒绝，也不静默丢格式
     if (kind === "whole-block" && hasRichFormatting(ctx.block)) {
         return "blockRichRefuse";
+    }
+
+    // revert 统一节点级优先：有完整覆盖的渲染公式 → 逐个还原（<br>/富格式/代码保持）
+    if (action === "revert") {
+        const covered = collectCoveredMathNodes(ctx.range);
+        if (covered.inline.length > 0 || covered.blocks.length > 0) {
+            return revertCoveredMathNodes(ctx, convertToPlain);
+        }
     }
 
     const source = extractSourceMarkdown(ctx.range, ctx.block, kind);
@@ -595,11 +699,21 @@ export async function runManualAction(
             await applyWholeBlock(ctx.block!, out);
             return "revertDone";
         }
-        // 局部还原仍走原地替换（结果是纯文本）
+        // 局部源码还原：\n 还原为 <br>，不把多行压成一个 Text 节点
         ctx.range.deleteContents();
-        const textNode = document.createTextNode(out);
-        ctx.range.insertNode(textNode);
-        removeEmptySplitTail(textNode);
+        const parts = out.split("\n");
+        const frag = document.createDocumentFragment();
+        parts.forEach((part, i) => {
+            if (i > 0) {
+                frag.appendChild(document.createElement("br"));
+            }
+            if (part) {
+                frag.appendChild(document.createTextNode(part));
+            }
+        });
+        const lastNode = frag.lastChild ? frag.lastChild : document.createTextNode("");
+        ctx.range.insertNode(frag);
+        removeEmptySplitTail(lastNode);
         commitEditorChange(ctx.protyleElement);
         return "revertDone";
     }

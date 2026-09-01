@@ -126,8 +126,8 @@ export function detectPasteScenario(input: ScenarioInput): PasteScenario {
     if (!looksLikeMath(textPlain)) {
         return "plain-prose";
     }
-    // 6. 强 LaTeX 定界符 → AI 数学文本
-    if (STRONG_LATEX_RE.test(textPlain)) {
+    // 6. 强 LaTeX 定界符（只看非保护段）→ AI 数学文本
+    if (STRONG_LATEX_RE.test(nonProtectedText(textPlain))) {
         return "ai-latex";
     }
     // 7. 其余有数学信号的内容（弱信号与正文混合）
@@ -173,13 +173,17 @@ export interface PastePlan {
     action: "pass" | "fix";
     /** pass 时是否给出场景提示（提示文案与数量由上层处理） */
     hint: boolean;
+    /** fix 且 HTML 携带复杂富文本结构（链接/图片/表格/...）：原样放行 + 提示。
+     *  必须在一切 payload 重写之前生效，否则 $$ 快路径会绕过保护。 */
+    richPreserved: boolean;
 }
 
 /**
  * 粘贴路由的唯一决策入口（EventBus paste 事件调用）。
  *
  * 固定放行场景（siyuan-internal / code-target / plain-prose）直接原样；
- * code-content 智能策略与所有 pass 策略原样 + 提示；其余进入修复管线。
+ * code-content 智能策略与所有 pass 策略原样 + 提示；其余进入修复管线，
+ * 但复杂富文本（无法无损重写）在修复管线内整体放行。
  */
 export function planPasteHandling(input: PastePlanInput): PastePlan {
     const scenario = detectPasteScenario({
@@ -189,13 +193,43 @@ export function planPasteHandling(input: PastePlanInput): PastePlan {
         inCodeTarget: input.inCodeTarget,
     });
     if (scenario === "siyuan-internal" || scenario === "code-target" || scenario === "plain-prose") {
-        return {scenario, action: "pass", hint: false};
+        return {scenario, action: "pass", hint: false, richPreserved: false};
     }
     const policy = input.getPolicy(scenario);
     if (policy === "pass" || (policy === "smart" && scenario === "code-content")) {
-        return {scenario, action: "pass", hint: true};
+        return {scenario, action: "pass", hint: true, richPreserved: false};
     }
-    return {scenario, action: "fix", hint: false};
+    return {scenario, action: "fix", hint: false, richPreserved: hasComplexRichHTML(input.textHTML)};
+}
+
+export type PasteHandling =
+    | {kind: "passthrough", plan: PastePlan, reason: "files" | "plan-pass" | "rich"}
+    | {kind: "fix", plan: PastePlan};
+
+export interface PasteHandlingInput extends PastePlanInput {
+    hasFiles: boolean;
+}
+
+/**
+ * 粘贴处理的统一决策（顺序契约，供 EventBus paste 编排层与测试共用）：
+ * 1. 附件（file）→ 整体放行（任何 payload 不改）；
+ * 2. 场景 plan → pass → 放行（提示按 plan.hint）；
+ * 3. 复杂富文本 → 放行 + 提示（在 selectClipboardMarkdown / mdToSiyuanHTML
+ *    等一切 payload 重写之前——`$$` 快路径不得绕过）；
+ * 4. 其余 → 进入修复管线。
+ */
+export function decidePasteHandling(input: PasteHandlingInput): PasteHandling {
+    if (input.hasFiles) {
+        return {kind: "passthrough", reason: "files", plan: planPasteHandling(input)};
+    }
+    const plan = planPasteHandling(input);
+    if (plan.action === "pass") {
+        return {kind: "passthrough", reason: "plan-pass", plan};
+    }
+    if (plan.richPreserved) {
+        return {kind: "passthrough", reason: "rich", plan};
+    }
+    return {kind: "fix", plan};
 }
 
 // 避免循环依赖：hasMathML 与 looksLikeMath 在各自模块导出

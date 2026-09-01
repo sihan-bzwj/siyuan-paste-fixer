@@ -83,12 +83,12 @@ const STRONG_TOKEN_RE = /\\(?:frac|dfrac|sum|int|prod|sqrt|mathbb|left|right|tex
 /** 数学信号（粘贴拦截和右键菜单显示判断共用；含 Markdown 转义形态） */
 const MATH_SIGNALS_RE = /\$\$|\\\[|\\\]|\\\(|\\\)|\\begin\{|\\boxed\{|\\underbrace\{|\\frac\{|<math[\s>]|\\\\[a-zA-Z]|\\[_=^]/i;
 
-/** 非保护段拼接文本（代码围栏/行内代码/链接/URL 之外的内容），供场景分类只基于可见正文判定。 */
+/** 非保护段拼接文本（代码围栏/行内代码/链接/URL 之外的内容，以 \n 分隔防跨段拼出词汇）。 */
 export function nonProtectedText(text: string): string {
     return splitMarkdownSegments(text)
         .filter((segment) => !segment.protected)
         .map((segment) => segment.text)
-        .join("");
+        .join("\n");
 }
 
 export function looksLikeMath(text: string): boolean {

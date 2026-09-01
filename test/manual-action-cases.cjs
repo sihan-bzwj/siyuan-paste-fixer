@@ -544,6 +544,58 @@ async function main() {
         document.body.innerHTML = "";
     }
 
+    console.log("== 23. 跨块 revert 含代码：跳过代码、只还原公式 ==");
+    {
+        const editor = mkEditor();
+        const e1 = document.createElement("div");
+        e1.setAttribute("data-node-id", "q1");
+        e1.setAttribute("data-type", "NodeParagraph");
+        e1.innerHTML = '<span data-type="inline-math" data-subtype="math" data-content="x"></span>';
+        editor.appendChild(e1);
+        const codeSpan = document.createElement("div");
+        codeSpan.setAttribute("data-node-id", "q2");
+        codeSpan.setAttribute("data-type", "NodeParagraph");
+        codeSpan.innerHTML = '中间 <span data-type="code">不要动</span> 文字';
+        editor.appendChild(codeSpan);
+        const e3 = document.createElement("div");
+        e3.setAttribute("data-node-id", "q3");
+        e3.setAttribute("data-type", "NodeParagraph");
+        e3.innerHTML = '<span data-type="inline-math" data-subtype="math" data-content="y"></span>';
+        editor.appendChild(e3);
+        const range = document.createRange();
+        range.setStart(e1.firstChild, 0);
+        range.setEnd(e3.firstChild, 0);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "跨块含代码还原返回 revertDone（代码不阻塞）", key);
+        assert(e1.querySelector('[data-type="inline-math"]') === null && e3.querySelector('[data-type="inline-math"]') === null,
+            "两侧公式都还原");
+        assert(codeSpan.querySelector('[data-type="code"]') !== null, "中间代码 span 原样保持");
+        assert(codeSpan.textContent.includes("不要动"), "代码文字不被碰");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 24. 局部源码还原跨 <br>：结构不压平（\\n → <br> 分段） ==");
+    {
+        const editor = mkEditor();
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "r1");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = "P $x$ <br> $y$ Q";
+        editor.appendChild(block);
+        // 选 " $x$ <br> $y$ "（含 br 与两侧标准源码公式）
+        const range = document.createRange();
+        range.setStart(block.firstChild, 2);
+        range.setEnd(block.childNodes[2], 5);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "局部源码还原返回 revertDone", key);
+        assert(block.querySelectorAll("br").length >= 1, "<br> 结构保留（不压成单个 Text）", String(block.querySelectorAll("br").length));
+        assert(block.textContent.includes("x") && block.textContent.includes("y") && !block.textContent.includes("$x$") && !block.textContent.includes("$y$"),
+            "源码公式还原为纯文本", block.textContent);
+        document.body.innerHTML = "";
+    }
+
     console.log(`\n手动转换测试: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }

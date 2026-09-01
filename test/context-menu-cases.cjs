@@ -401,6 +401,23 @@ async function main() {
         document.body.innerHTML = "";
     }
 
+    console.log("== 14. Heading 整块选中：菜单不显示「强制转换」（块类型门禁同源） ==");
+    {
+        const editor = mkEditor();
+        const heading = document.createElement("div");
+        heading.setAttribute("data-node-id", "hd1");
+        heading.setAttribute("data-type", "NodeHeading");
+        heading.textContent = "标题 x^2";
+        editor.appendChild(heading);
+        const {handlers} = makeHandlers();
+        const menu = mkSingletonMenu();
+        selectIn(heading);
+        rightClick(heading);
+        handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
+        assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 0, "Heading 整块不显示任何项（与执行层 blockTypeRefuse 同源）");
+        done(handlers);
+    }
+
     console.log(`\n右键菜单测试: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }
