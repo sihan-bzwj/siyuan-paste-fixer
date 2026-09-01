@@ -721,15 +721,18 @@ async function main() {
         span.setAttribute("data-type", "inline-math");
         span.setAttribute("data-subtype", "math");
         span.setAttribute("data-content", "y_i");
+        span.textContent = "y_i"; // 带子节点：range 边界落在 span 上时 commonAncestor === span
         const block = document.createElement("div");
         block.setAttribute("data-node-id", "ia1");
         block.setAttribute("data-type", "NodeParagraph");
         block.appendChild(span);
         editor.appendChild(block);
-        // range 覆盖 span 自身：commonAncestorContainer === span
+        // range 覆盖 span 内容：commonAncestorContainer === span（非 collapsed）
         const range = document.createRange();
-        range.setStart(block, 0);
-        range.setEnd(block, block.childNodes.length);
+        range.setStart(span, 0);
+        range.setEnd(span, span.childNodes.length);
+        assert(range.collapsed === false && range.commonAncestorContainer === span,
+            "range 非 collapsed 且公共祖先为 span 自身", String(range.commonAncestorContainer.nodeName));
         const ctx = M.captureManualContext(range, null);
         const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
         assert(key === "revertDone", "inline-math 作为公共祖先时仍节点级还原", key);
