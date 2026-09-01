@@ -245,7 +245,8 @@ async function main() {
         assert(fixKey === "alreadyMath", "公式块 + 强制转换 → alreadyMath", fixKey);
         const revertKey = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
         assert(revertKey === "revertDone", "公式块 + revert → revertDone", revertKey);
-        assert(updateCalls.length === 1 && updateCalls[0].id === "mb1" && updateCalls[0].data === "E=mc^2", "还原以原块 id 走 updateBlock", JSON.stringify(updateCalls));
+        assert(updateCalls.length === 1 && updateCalls[0].id === "mb1" && updateCalls[0].dataType === "dom",
+            "公式块还原以原块 id 走 dom 字面文本（不经 Markdown 解析）", JSON.stringify(updateCalls));
         document.body.innerHTML = "";
     }
 
@@ -475,8 +476,9 @@ async function main() {
         const ctx = M.captureManualContext(range, null);
         const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
         assert(key === "revertDone", "跨块含公式块还原返回 revertDone", key);
-        assert(updateCalls.length === 1 && updateCalls[0].id === "k2" && updateCalls[0].data === "E=mc^2",
-            "只对公式块 k2 走 updateBlock（转回文本）", JSON.stringify(updateCalls));
+        assert(updateCalls.length === 1 && updateCalls[0].id === "k2" && updateCalls[0].dataType === "dom" &&
+            updateCalls[0].data.includes("E=mc^2"),
+            "只对公式块 k2 走 dom 字面还原", JSON.stringify(updateCalls));
         assert(b1.textContent === "普通段落" && b3.textContent === "结尾文字", "普通段落不碰");
         document.body.innerHTML = "";
     }
@@ -593,6 +595,73 @@ async function main() {
         assert(block.querySelectorAll("br").length >= 1, "<br> 结构保留（不压成单个 Text）", String(block.querySelectorAll("br").length));
         assert(block.textContent.includes("x") && block.textContent.includes("y") && !block.textContent.includes("$x$") && !block.textContent.includes("$y$"),
             "源码公式还原为纯文本", block.textContent);
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 25. 节点级 revert 不受块类型/富格式门禁阻挡 ==");
+    {
+        let updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        // Heading 内含渲染公式：完整选中 → revert 应节点级成功（门禁只保护 fix/整块重写）
+        const heading = document.createElement("div");
+        heading.setAttribute("data-node-id", "hdX");
+        heading.setAttribute("data-type", "NodeHeading");
+        heading.innerHTML = '标题 <span data-type="inline-math" data-subtype="math" data-content="x_i"></span> 内容';
+        editor.appendChild(heading);
+        const range = document.createRange();
+        range.setStart(heading.firstChild, 0);
+        range.setEnd(heading.lastChild, heading.lastChild.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "Heading 整块内的公式节点级还原成功（blockTypeRefuse 不挡 revert）", key);
+        assert(heading.querySelector('[data-type="inline-math"]') === null, "公式已还原");
+        assert(heading.getAttribute("data-type") === "NodeHeading", "Heading 类型不变");
+        document.body.innerHTML = "";
+
+        // strong + 公式整块：revert 成功且 strong 保留
+        const editor2 = mkEditor();
+        const rich = document.createElement("div");
+        rich.setAttribute("data-node-id", "rp1");
+        rich.setAttribute("data-type", "NodeParagraph");
+        rich.innerHTML = '<strong>重要</strong> <span data-type="inline-math" data-subtype="math" data-content="y"></span>';
+        editor2.appendChild(rich);
+        const range2 = document.createRange();
+        range2.setStart(rich.firstChild, 0);
+        range2.setEnd(rich.lastChild, rich.lastChild.length);
+        const ctx2 = M.captureManualContext(range2, null);
+        const key2 = await M.runManualAction(ctx2, "revert", fixLatexText, convertToPlain);
+        assert(key2 === "revertDone", "strong + 公式整块还原成功（blockRichRefuse 不挡节点级 revert）", key2);
+        assert(rich.querySelector('[data-type="inline-math"]') === null && rich.querySelector("strong") !== null,
+            "公式还原且 strong 保留", rich.innerHTML);
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 26. NodeMathBlock 还原为字面文本（不经 Markdown 解析） ==");
+    {
+        let updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        const mb = document.createElement("div");
+        mb.setAttribute("data-node-id", "md1");
+        mb.setAttribute("data-type", "NodeMathBlock");
+        mb.setAttribute("data-content", "* x");
+        editor.appendChild(mb);
+        const range = document.createRange();
+        range.setStart(mb, 0);
+        range.setEnd(mb, mb.childNodes.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+        assert(key === "revertDone", "含 Markdown 特殊字符的公式块还原返回 revertDone", key);
+        assert(updateCalls.length === 1 && updateCalls[0].dataType === "dom" &&
+            updateCalls[0].data.includes("* x") && updateCalls[0].data.includes("NodeParagraph"),
+            "以 dom 字面文本写入（* x 不会被解释成列表）", JSON.stringify(updateCalls[0]));
         document.body.innerHTML = "";
     }
 

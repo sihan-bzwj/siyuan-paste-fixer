@@ -38,7 +38,7 @@ async function main() {
     });
     const { tokenizeInlineMath, tokenizeMath } = require("./_fix-latex.cjs");
     const { detectPasteScenario, countMathFormulas, planPasteHandling } = require("./_scenario.cjs");
-    const { capturePasteContext, consumePasteContext, PASTE_CONTEXT_WINDOW_MS } = require("./_paste-context.cjs");
+    const { capturePasteContext, consumePasteContext, PASTE_CONTEXT_WINDOW_MS, resolvePasteContext } = require("./_paste-context.cjs");
     const R = String.raw;
 
     const dom = new JSDOM("<!DOCTYPE html><body></body>", {url: "http://localhost/"});
@@ -88,6 +88,22 @@ async function main() {
         const old = {time: Date.now() - PASTE_CONTEXT_WINDOW_MS - 100, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "", textHTML: ""};
         assert(consumePasteContext(old, Date.now()) === null, "超过观察窗的快照忽略");
         assert(consumePasteContext(null, Date.now()) === null, "无快照返回 null");
+    }
+
+    console.log("== 2a. 安全标志与指纹解耦：CRLF→LF / HTML sanitize 不丢 inCodeTarget ==");
+    {
+        // 思源在原生 paste 与 EventBus 之间 normalize：CRLF→LF、HTML sanitize
+        const snap = {time: Date.now() - 50, inCodeTarget: true, protyleElement: null, hasFiles: false, textPlain: "x\r\ny", textHTML: "<IMG>"};
+        const res = resolvePasteContext(snap, Date.now(), {textPlain: "x\ny", textHTML: "<img>"});
+        assert(res.context === null, "内容指纹不匹配 → 内容上下文为空", JSON.stringify(res));
+        assert(res.codeTarget === true, "安全标志 inCodeTarget 仍可信（代码块保护不失效）", JSON.stringify(res));
+        assert(consumePasteContext(snap, Date.now(), {textPlain: "x\ny"}) === null, "consume 保持严格语义（内容上下文）");
+        const snapFiles = {...snap, inCodeTarget: false, hasFiles: true};
+        const res2 = resolvePasteContext(snapFiles, Date.now(), {textPlain: "其他内容"});
+        assert(res2.codeTarget === false && res2.hasFiles === true, "hasFiles 安全标志同样保留", JSON.stringify(res2));
+        const stale = {...snap, time: Date.now() - PASTE_CONTEXT_WINDOW_MS - 100};
+        const res3 = resolvePasteContext(stale, Date.now(), {});
+        assert(res3.codeTarget === false && res3.hasFiles === false, "窗口外安全标志清空（不吃旧粘贴）");
     }
 
     console.log("== 2b. 行内代码目标：span[data-type=code] + caret 位置检测 ==");

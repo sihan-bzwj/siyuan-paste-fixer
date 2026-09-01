@@ -67,7 +67,7 @@ npm install && npm run build
 
 | 场景 | 默认行为 |
 |---|---|
-| 思源内部复制（含公式节点） | 原样放行 |
+| 思源内部复制（任意非空 siyuanHTML） | 原样放行（内部结构/块 ID 依赖它保留） |
 | 代码块内粘贴 | 原样放行（代码永不参与公式修复） |
 | 代码内容（CSS/HTML/SCSS/JSON/JS 等） | 原样粘贴 + 场景提示 |
 | 网页公式（MathML/KaTeX/MathJax） | 提取原始 TeX 优先 |
@@ -120,7 +120,7 @@ npm run check     # 发布门禁：typecheck → 版本一致 → 全量测试 �
 npm run release-check  # check + 打包 + 发布内容检查
 ```
 
-约 590 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.x 新模块：手动转换（强制转换/还原、局部全量片段、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、跨块拒绝、`<br>` 换行序列化、分屏编辑器推导）、右键菜单（上下文相关项、common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照含行内代码 caret、500ms 时效、文本指纹）、统一 `$` 扫描器（跨行 `$...$` 自动升级 `$$...$$`、金额/Shell/空行边界保护、场景入口同口径）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）、箭头命令白名单断词（`\rightarrowEdge` → `\rightarrow Edge`）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
+约 600 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.x 新模块：手动转换（强制转换/还原、局部全量片段、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、跨块拒绝、`<br>` 换行序列化、分屏编辑器推导）、右键菜单（上下文相关项、common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照含行内代码 caret、500ms 时效、文本指纹）、统一 `$` 扫描器（跨行 `$...$` 自动升级 `$$...$$`、金额/Shell/空行边界保护、场景入口同口径）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）、箭头命令白名单断词（`\rightarrowEdge` → `\rightarrow Edge`）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
 
 ## 项目结构
 

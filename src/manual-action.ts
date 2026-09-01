@@ -1,5 +1,5 @@
 /**
- * 手动转换动作层（v0.2.7 语义收敛）。
+ * 手动转换动作层（v0.2.6 语义收敛）。
  *
  * 与自动粘贴的分工：
  * - 自动粘贴 → 保守、智能判断，宁可漏掉不乱改；
@@ -44,7 +44,7 @@ export interface ManualContext {
 export type ManualActionKind =
     | "local-inline"   // 局部行内：原地替换
     | "whole-block"    // 完整单块：updateBlock 保 ID
-    | "cross-block"    // 跨块：逐块批处理
+    | "cross-block"    // 跨块：fix 拒绝；revert 节点级（只还原完整覆盖的公式节点）
     | "collapsed-at-math" // 光标在公式内：fix 不动作 / revert 还原
     | "collapsed-text"    // 光标在普通文字：提示选择
     | "none";
@@ -485,11 +485,11 @@ function nodeFullyCovered(node: Node, range: Range): boolean {
 function collectCoveredMathNodes(
     range: Range,
 ): {inline: Element[], blocks: Array<{id: string, content: string}>} {
-    const startEl = range.startContainer.nodeType === 1
-        ? range.startContainer as Element
-        : (range.startContainer.parentElement as Element | null);
-    const scope = startEl?.closest?.(".protyle-wysiwyg") as HTMLElement | null;
-    const walker = document.createTreeWalker(scope ?? document.body, NodeFilter.SHOW_ELEMENT);
+    // 从 range 公共祖先开始扫描：普通局部选区只扫一个块/段落，跨块时才自然
+    // 扩大到共同祖先（不再每次右键扫整个编辑器）
+    const ancestor = range.commonAncestorContainer;
+    const rootEl = (ancestor.nodeType === 1 ? ancestor : ancestor.parentElement) as Element | null;
+    const walker = document.createTreeWalker(rootEl ?? document.body, NodeFilter.SHOW_ELEMENT);
     const inline: Element[] = [];
     const blocks: Array<{id: string, content: string}> = [];
     let node: Node | null = walker.nextNode();
@@ -540,7 +540,8 @@ async function revertCoveredMathNodes(
         commitEditorChange(ctx.protyleElement);
     }
     for (const b of blocks) {
-        await applyWholeBlockById(b.id, convertToPlain("$$\n" + b.content + "\n$$"));
+        // 还原 = 字面文本：不经过 Markdown 解析（"* x" 不会被变成列表）
+        await applyPlainTextBlockById(b.id, convertToPlain("$$\n" + b.content + "\n$$"));
     }
     return "revertDone";
 }
@@ -554,6 +555,36 @@ async function applyWholeBlockById(id: string, markdown: string): Promise<void> 
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({id, dataType: "markdown", data: markdown}),
+    });
+    if (!r.ok) {
+        throw new Error("updateBlock http " + r.status);
+    }
+    const j = await r.json() as {code: number, msg?: string};
+    if (j.code !== 0) {
+        throw new Error(j.msg || "updateBlock failed");
+    }
+}
+
+/**
+ * 公式块 → 纯文本（**不经过 Markdown 解析**）：
+ * 以 dom 类型明确构造 NodeParagraph，公式内容中的 `*`/`#`/`1.`/`_`/`[`
+ * 全部作为字面文本（revert 不应该让普通文本重新被 Markdown 解释成列表/标题等）。
+ * 换行还原为 <br>，< & > 转义。
+ */
+async function applyPlainTextBlockById(id: string, text: string): Promise<void> {
+    if (!id) {
+        throw new Error("block id missing");
+    }
+    const escaped = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\n/g, "<br>");
+    const dom = `<div data-node-id="${id}" data-type="NodeParagraph"><div contenteditable="true">${escaped}</div></div>`;
+    const r = await fetch("/api/block/updateBlock", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({id, dataType: "dom", data: dom}),
     });
     if (!r.ok) {
         throw new Error("updateBlock http " + r.status);
@@ -599,6 +630,14 @@ export function getManualCapabilities(ctx: ManualContext): ManualCapabilities {
     if (ctx.block !== null) {
         const isWhole = !hasUnselectedContent(ctx.block, ctx.range);
         if (isWhole && !wholeBlockAllowed(ctx.block)) {
+            canFix = false;
+        }
+    }
+    // fix 需要能安全序列化选中内容（含白名单外语义元素 → 执行层必拒，菜单同步隐藏）
+    if (canFix) {
+        const container = document.createElement("div");
+        container.appendChild(ctx.range.cloneContents());
+        if (serializeSafeSelection(container) === null) {
             canFix = false;
         }
     }
@@ -650,7 +689,8 @@ export async function runManualAction(
         }
         const block = node?.closest('[data-type="NodeMathBlock"]') as HTMLElement | null;
         if (block) {
-            await applyWholeBlockById(block.getAttribute("data-node-id") || "",
+            // 还原 = 字面文本（不经过 Markdown 解析）
+            await applyPlainTextBlockById(block.getAttribute("data-node-id") || "",
                 convertToPlain("$$\n" + (block.getAttribute("data-content") || "") + "\n$$"));
             return "revertDone";
         }
@@ -658,12 +698,20 @@ export async function runManualAction(
     if (kind === "collapsed-text" || kind === "none") {
         return "noSelection";
     }
-    // 跨块：fix 拒绝（跨块部分选择会改写整个首尾块/块类型）；revert 节点级安全
-    if (kind === "cross-block") {
-        if (action === "fix") {
-            return "crossBlockRefuse";
+    // revert：节点级优先，且**先于**整块类型/富格式门禁——节点级还原不动块结构
+    // 与类型（Heading/rich 块内的公式也可以安全还原），门禁只保护 fix/整块重写
+    if (action === "revert") {
+        const covered = collectCoveredMathNodes(ctx.range);
+        if (covered.inline.length > 0 || covered.blocks.length > 0) {
+            return revertCoveredMathNodes(ctx, convertToPlain);
         }
-        return revertCoveredMathNodes(ctx, convertToPlain);
+        if (kind === "cross-block") {
+            return "noChange"; // 跨块且无完整覆盖的公式节点：无可还原
+        }
+    }
+    // 跨块 fix：拒绝（跨块部分选择会改写整个首尾块/块类型）
+    if (kind === "cross-block") {
+        return "crossBlockRefuse";
     }
     // 整块写回按块类型授权限（Heading/CodeBlock/未知块拒绝，防类型被意外改写）
     if (kind === "whole-block" && !wholeBlockAllowed(ctx.block)) {
@@ -672,14 +720,6 @@ export async function runManualAction(
     // 完整块含白名单外元素：宁可拒绝，也不静默丢格式
     if (kind === "whole-block" && hasRichFormatting(ctx.block)) {
         return "blockRichRefuse";
-    }
-
-    // revert 统一节点级优先：有完整覆盖的渲染公式 → 逐个还原（<br>/富格式/代码保持）
-    if (action === "revert") {
-        const covered = collectCoveredMathNodes(ctx.range);
-        if (covered.inline.length > 0 || covered.blocks.length > 0) {
-            return revertCoveredMathNodes(ctx, convertToPlain);
-        }
     }
 
     const source = extractSourceMarkdown(ctx.range, ctx.block, kind);

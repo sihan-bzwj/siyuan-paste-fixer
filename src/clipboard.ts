@@ -52,8 +52,9 @@ export function selectClipboardMarkdown(
     textPlain: string,
     siyuanHTML: string,
 ): ClipboardDecision | null {
-    // 思源内部复制已经带公式节点，结构最完整，任何二次处理都可能造成重复。
-    if (siyuanHTML && /data-type="(?:NodeMathBlock|inline-math)"/.test(siyuanHTML)) {
+    // 思源内部复制：任何非空 siyuanHTML 都是内部结构（Heading/列表/引用/块 ID），
+    // 结构最完整，任何二次处理都可能造成重复或破坏。
+    if (siyuanHTML.trim()) {
         return null;
     }
 

@@ -105,8 +105,9 @@ export const DEFAULT_POLICY: Record<PasteScenario, ScenarioPolicy> = {
 
 export function detectPasteScenario(input: ScenarioInput): PasteScenario {
     const {textPlain, textHTML, siyuanHTML, inCodeTarget} = input;
-    // 1. 思源内部复制：公式节点齐备，任何二次处理都可能造成重复
-    if (siyuanHTML && /data-type="(?:NodeMathBlock|inline-math)"/.test(siyuanHTML)) {
+    // 1. 思源内部复制：任何非空 siyuanHTML 都是内部结构粘贴（Heading/列表/引用/
+    //    块 ID 依赖它保留）——插件整体放行，不参与任何二次处理
+    if (siyuanHTML.trim()) {
         return "siyuan-internal";
     }
     // 2. 粘贴目标在代码块/行内代码内：代码内容永不参与公式修复
@@ -160,11 +161,28 @@ export interface PastePlanInput {
 }
 
 /**
- * 复杂富文本结构判定（链接/图片/表格/列表/标题/引用）：这些结构无法无损重写，
- * 粘贴时插件 fail-closed 原样放行（绝不为了公式丢结构）。
+ * 复杂富文本结构判定（fail-closed allowlist）：只有 p/div/br/span 这类可安全
+ * 重建的标签允许插件重写；code/kbd/strong/em/a/img/table/标题/引用等一切带
+ * 语义的元素出现即判复杂 → 粘贴时插件原样放行（绝不为了公式丢结构）。
+ * MathML 内容走专门提取路径（保真），不视为复杂结构。
  */
 export function hasComplexRichHTML(textHTML: string): boolean {
-    return /<(a|img|table|pre|ul|ol|li|h[1-6]|blockquote)[\s>]/i.test(textHTML);
+    if (!textHTML || !textHTML.trim()) {
+        return false;
+    }
+    if (hasMathML(textHTML)) {
+        return false; // MathML 由专门路径提取（保真），不参与 allowlist
+    }
+    const tags = new Set(
+        Array.from(textHTML.matchAll(/<([a-zA-Z][a-zA-Z0-9-]*)\b/g), (m) => m[1].toLowerCase()),
+    );
+    const SAFE_TAGS = new Set(["p", "div", "br", "span"]);
+    for (const tag of tags) {
+        if (!SAFE_TAGS.has(tag)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 export interface PastePlan {

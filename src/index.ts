@@ -18,7 +18,7 @@ import {hasMathML} from "./mathml";
 import {captureManualContext, deriveProtyleElement, ManualContext, runManualAction} from "./manual-action";
 import {createMenuHandlers, MenuHandlers} from "./context-menu";
 import {createSettingsPanel, loadSettingsFromFile, PasteFixerSettings, saveSettingsToFile} from "./settings";
-import {capturePasteContext, consumePasteContext, PasteContextSnapshot} from "./paste-context";
+import {capturePasteContext, codeTargetFromProtyle, PasteContextSnapshot, resolvePasteContext} from "./paste-context";
 import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
 
 type PasteDetail = IEventBusMap["paste"];
@@ -71,9 +71,13 @@ export default class PasteFixer extends Plugin {
             const siyuanHTML = detail.siyuanHTML || "";
             const files = detail.files;
 
-            // 消费原生 paste 快照（代码块目标信息事件总线无法自行感知；带指纹校验）
-            const snap = consumePasteContext(this.pasteSnapshot, Date.now(), {textPlain, textHTML});
+            // 解析原生 paste 快照：安全标志（代码目标/文件）与内容指纹解耦——
+            // 思源会在原生 paste 与 EventBus 之间 normalize 文本（CRLF→LF、
+            // HTML sanitize），严格指纹匹配会误丢 inCodeTarget 导致代码保护失效；
+            // 再以 EventBus 自带 detail.protyle 实时判定互为备份
+            const snapRes = resolvePasteContext(this.pasteSnapshot, Date.now(), {textPlain, textHTML});
             this.pasteSnapshot = null;
+            const inCodeTarget = snapRes.codeTarget || codeTargetFromProtyle(detail.protyle);
 
             // 统一决策（顺序契约：附件 → 场景 pass → 复杂富文本 → 修复管线；
             // 复杂富文本在一切 payload 重写之前生效，$$ 快路径不得绕过）
@@ -81,8 +85,8 @@ export default class PasteFixer extends Plugin {
                 textPlain,
                 textHTML,
                 siyuanHTML,
-                inCodeTarget: !!snap?.inCodeTarget,
-                hasFiles: !!snap?.hasFiles || (!!files && files.length > 0),
+                inCodeTarget,
+                hasFiles: snapRes.hasFiles || (!!files && files.length > 0),
                 getPolicy: (s) => this.scenarioPolicy(s),
             });
             if (handling.kind === "passthrough") {

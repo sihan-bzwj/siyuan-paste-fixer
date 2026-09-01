@@ -28,8 +28,11 @@ async function main() {
     const R = String.raw;
 
     console.log("== 1. 固定放行场景 ==");
-    assert(detectPasteScenario(ctx("", "", '<span data-type="inline-math">x</span>')) === "siyuan-internal", "思源内部复制");
-    assert(detectPasteScenario(ctx("$x$", "", '<div data-type="NodeMathBlock"></div>')) === "siyuan-internal", "内部公式块优先于内容");
+    assert(detectPasteScenario(ctx("", "", '<div data-type="NodeHeading">标题 \\(x\\)</div>')) === "siyuan-internal", "内部 Heading + \\frac 原样放行");
+    assert(detectPasteScenario(ctx("", "", '<div data-type="NodeList"><div>项 \\(x\\)</div></div>')) === "siyuan-internal", "内部列表 + \\(x\\) 原样放行");
+    assert(detectPasteScenario(ctx("", "", '<div data-type="NodeBlockquote">引用 \\(x\\)</div>')) === "siyuan-internal", "内部引用 + 公式 原样放行");
+    assert(detectPasteScenario(ctx("", "", '<div data-type="NodeParagraph">普通段落 \\[x\\]</div>')) === "siyuan-internal", "内部普通段落 + \\[x\\] 原样放行（任意非空 siyuanHTML 都不参与）");
+    assert(detectPasteScenario(ctx("$x$", "", '<span data-type="inline-math">x</span>')) === "siyuan-internal", "内部公式块优先于内容");
     assert(detectPasteScenario(ctx("代码", "", "", true)) === "code-target", "代码块目标");
     assert(detectPasteScenario(ctx("普通一句话，没有公式。", "", "")) === "plain-prose", "纯散文");
 
@@ -103,8 +106,10 @@ async function main() {
         assert(detectPasteScenario(ctx("```js\nconst a = 1;\n```\n公式 \\(x_i\\)")) === "ai-latex", "fenced JS + 外部公式：只按外部正文判定（不整体判 code）");
         assert(hasComplexRichHTML('<p>参考 <a href="https://example.com">链接</a> 公式 \\(x^2\\)</p>') === true, "含链接的富文本判为复杂结构（fail-closed 原样）");
         assert(hasComplexRichHTML("<table><tr><td>1</td></tr></table>") === true, "表格判为复杂结构");
-        assert(hasComplexRichHTML("<p>普通段落 <strong>加粗</strong></p>") === false, "简单行内格式不算复杂结构");
-        assert(hasComplexRichHTML("<p>纯文本</p>") === false, "纯段落不拦");
+        assert(hasComplexRichHTML("<p>普通段落 <strong>加粗</strong></p>") === true, "strong/em 等语义元素同样判为复杂（allowlist）");
+        assert(hasComplexRichHTML("<p>使用 <code>x_i</code> 然后 \\(y_i\\)</p>") === true, "code 语义不丢（allowlist 拦截）");
+        assert(hasComplexRichHTML("<p>纯文本</p>") === false, "纯段落可安全重建");
+        assert(hasComplexRichHTML('<math><mi>x</mi></math><p>网页</p>') === false, "MathML 走专门提取路径，不视为复杂结构");
         assert(detectPasteScenario(ctx("```latex\n\\frac{x}{y}\n```\n正文 $z$")) === "mixed", "fence 内 \\frac 不强判 ai-latex（只按外部 $z$ 判定）");
         // 粘贴编排顺序：附件 → plan pass → 复杂富文本 → 修复管线
         const richHtml = '<p>看 <a href="https://example.com">这里</a></p>';
