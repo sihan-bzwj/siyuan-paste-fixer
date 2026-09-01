@@ -642,26 +642,47 @@ async function main() {
 
     console.log("== 26. NodeMathBlock 还原为字面文本（不经 Markdown 解析） ==");
     {
-        let updateCalls = [];
-        global.fetch = async (url, opts) => {
-            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
-            return {ok: true, json: async () => ({code: 0})};
-        };
+        for (const [label, content] of [["* x", "* x"], ["# x", "# x"], ["1. x", "1. x"]]) {
+            let updateCalls = [];
+            global.fetch = async (url, opts) => {
+                if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+                return {ok: true, json: async () => ({code: 0})};
+            };
+            const editor = mkEditor();
+            const mb = document.createElement("div");
+            mb.setAttribute("data-node-id", "mdX");
+            mb.setAttribute("data-type", "NodeMathBlock");
+            mb.setAttribute("data-content", content);
+            editor.appendChild(mb);
+            const range = document.createRange();
+            range.setStart(mb, 0);
+            range.setEnd(mb, mb.childNodes.length);
+            const ctx = M.captureManualContext(range, null);
+            const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
+            assert(key === "revertDone", `含 Markdown 特殊字符（${label}）的公式块还原返回 revertDone`, key);
+            assert(updateCalls.length === 1 && updateCalls[0].dataType === "dom" &&
+                updateCalls[0].data.includes(content) && updateCalls[0].data.includes("NodeParagraph"),
+                `以 dom 字面文本写入（${label} 不会被解释成列表/标题）`, JSON.stringify(updateCalls[0]));
+            document.body.innerHTML = "";
+        }
+    }
+
+    console.log("== 27. 部分覆盖公式节点：不还原 ==");
+    {
         const editor = mkEditor();
-        const mb = document.createElement("div");
-        mb.setAttribute("data-node-id", "md1");
-        mb.setAttribute("data-type", "NodeMathBlock");
-        mb.setAttribute("data-content", "* x");
-        editor.appendChild(mb);
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "po1");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = 'A <span data-type="inline-math" data-subtype="math" data-content="x_i"></span> B';
+        editor.appendChild(block);
+        // 只选公式前的 "A"（公式节点不在覆盖范围内）
         const range = document.createRange();
-        range.setStart(mb, 0);
-        range.setEnd(mb, mb.childNodes.length);
+        range.setStart(block.firstChild, 0);
+        range.setEnd(block.firstChild, 1);
         const ctx = M.captureManualContext(range, null);
         const key = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
-        assert(key === "revertDone", "含 Markdown 特殊字符的公式块还原返回 revertDone", key);
-        assert(updateCalls.length === 1 && updateCalls[0].dataType === "dom" &&
-            updateCalls[0].data.includes("* x") && updateCalls[0].data.includes("NodeParagraph"),
-            "以 dom 字面文本写入（* x 不会被解释成列表）", JSON.stringify(updateCalls[0]));
+        assert(key === "noChange", "未覆盖公式节点 → noChange（不还原）", key);
+        assert(block.querySelector('[data-type="inline-math"]') !== null, "公式保持原样");
         document.body.innerHTML = "";
     }
 

@@ -105,11 +105,17 @@ export interface PasteContextResolution {
     hasFiles: boolean;
 }
 
+/** 思源在原生 paste 与 EventBus 之间会 normalize 文本（CRLF→LF、行分隔符）。
+ *  指纹比较前先归一化，减少“实际同一内容”的误失配（安全标志不受任何影响）。 */
+function normalizePlainFingerprint(s: string): string {
+    return s.replace(/\r\n|\r|\u2028|\u2029/g, "\n");
+}
+
 /**
  * 快照解析：安全标志（inCodeTarget/hasFiles）与内容指纹解耦——
  * 思源会在原生 paste 与 EventBus 之间 normalize 文本（CRLF→LF、HTML sanitize），
  * 严格指纹匹配会误丢 inCodeTarget，导致代码块保护失效（issue #1 绕过）。
- * 窗口期内：安全标志始终可信；内容上下文仅在指纹一致时提供。
+ * 窗口期内：安全标志始终可信；内容上下文仅在指纹一致（含换行归一）时提供。
  */
 export function resolvePasteContext(
     snapshot: PasteContextSnapshot | null,
@@ -125,7 +131,8 @@ export function resolvePasteContext(
     }
     let matched = true;
     if (expected) {
-        if (expected.textPlain && snapshot.textPlain && expected.textPlain !== snapshot.textPlain) {
+        if (expected.textPlain && snapshot.textPlain &&
+            normalizePlainFingerprint(expected.textPlain) !== normalizePlainFingerprint(snapshot.textPlain)) {
             matched = false;
         }
         if (expected.textHTML && snapshot.textHTML && expected.textHTML !== snapshot.textHTML) {

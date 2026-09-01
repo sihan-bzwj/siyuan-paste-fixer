@@ -597,40 +597,55 @@ async function applyPlainTextBlockById(id: string, text: string): Promise<void> 
 
 /**
  * 手动动作能力判定（右键菜单与执行入口共用同一口径，避免“菜单能点、执行拒绝”分叉）。
- * - fix：端点不在代码、非跨块、整块时块类型安全、选区有内容；
+ * - fix：端点不在代码、非跨块、整块时块类型安全、选区内容可安全序列化；
  * - revert：存在被 range 完整覆盖的渲染公式节点（节点级还原路径）；
  *   代码只跳过不阻塞；端点本身在代码内时整体拒绝。
- * 富格式等深一级的拒绝仍由执行层兜底提示。
+ * can=false 时 reason 给出与执行层一致的拒绝 key（供提示/诊断）。
  */
 export interface ManualCapabilities {
     canFix: boolean;
     canRevert: boolean;
+    fixReason?: string;
+    revertReason?: string;
 }
 
 export function getManualCapabilities(ctx: ManualContext): ManualCapabilities {
     if (ctx.range.collapsed) {
         const at = collapsedAtMath(ctx.range);
-        return {canFix: false, canRevert: at !== null};
+        return {
+            canFix: false,
+            fixReason: "alreadyMath",
+            canRevert: at !== null,
+            revertReason: at === null ? "noSelection" : undefined,
+        };
     }
     // 端点本身在代码内：整体不参与
     if (rangeEndpointsInCode(ctx.range)) {
-        return {canFix: false, canRevert: false};
+        return {canFix: false, fixReason: "inCodeRange", canRevert: false, revertReason: "inCodeRange"};
     }
     const covered = collectCoveredMathNodes(ctx.range);
+    const canRevert = covered.inline.length > 0 || covered.blocks.length > 0;
     // fix：选区碰到任何代码 → 拒绝（与执行层 isCodeRange 同源）
     if (rangeContainsCode(ctx.range)) {
-        return {canFix: false, canRevert: covered.inline.length > 0 || covered.blocks.length > 0};
+        return {canFix: false, fixReason: "inCodeRange", canRevert, revertReason: canRevert ? undefined : "noChange"};
     }
     if (ctx.block !== ctx.endBlock) {
         // 跨块：fix 拒绝（整块语义无法保证）；revert 节点级安全（含代码跳过）
-        return {canFix: false, canRevert: covered.inline.length > 0 || covered.blocks.length > 0};
+        return {
+            canFix: false,
+            fixReason: "crossBlockRefuse",
+            canRevert,
+            revertReason: canRevert ? undefined : "noChange",
+        };
     }
     let canFix = true;
+    let fixReason: string | undefined;
     // 整块写回按块类型授权限
     if (ctx.block !== null) {
         const isWhole = !hasUnselectedContent(ctx.block, ctx.range);
         if (isWhole && !wholeBlockAllowed(ctx.block)) {
             canFix = false;
+            fixReason = "blockTypeRefuse";
         }
     }
     // fix 需要能安全序列化选中内容（含白名单外语义元素 → 执行层必拒，菜单同步隐藏）
@@ -639,11 +654,14 @@ export function getManualCapabilities(ctx: ManualContext): ManualCapabilities {
         container.appendChild(ctx.range.cloneContents());
         if (serializeSafeSelection(container) === null) {
             canFix = false;
+            fixReason = "blockRichRefuse";
         }
     }
     return {
         canFix,
-        canRevert: covered.inline.length > 0 || covered.blocks.length > 0,
+        fixReason: canFix ? undefined : fixReason,
+        canRevert,
+        revertReason: canRevert ? undefined : "noChange",
     };
 }
 

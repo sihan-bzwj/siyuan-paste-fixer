@@ -92,12 +92,14 @@ async function main() {
 
     console.log("== 2a. 安全标志与指纹解耦：CRLF→LF / HTML sanitize 不丢 inCodeTarget ==");
     {
-        // 思源在原生 paste 与 EventBus 之间 normalize：CRLF→LF、HTML sanitize
+        // 思源在原生 paste 与 EventBus 之间 normalize：CRLF→LF（指纹归一后匹配）、HTML sanitize
         const snap = {time: Date.now() - 50, inCodeTarget: true, protyleElement: null, hasFiles: false, textPlain: "x\r\ny", textHTML: "<IMG>"};
         const res = resolvePasteContext(snap, Date.now(), {textPlain: "x\ny", textHTML: "<img>"});
-        assert(res.context === null, "内容指纹不匹配 → 内容上下文为空", JSON.stringify(res));
+        assert(res.context === null, "HTML sanitize 不一致 → 内容上下文为空（安全标志仍可信）", JSON.stringify(res));
         assert(res.codeTarget === true, "安全标志 inCodeTarget 仍可信（代码块保护不失效）", JSON.stringify(res));
-        assert(consumePasteContext(snap, Date.now(), {textPlain: "x\ny"}) === null, "consume 保持严格语义（内容上下文）");
+        const resPlain = resolvePasteContext(snap, Date.now(), {textPlain: "x\ny"});
+        assert(resPlain.context === snap, "CRLF→LF 归一化后指纹匹配，内容上下文可用", JSON.stringify(resPlain));
+        assert(consumePasteContext(snap, Date.now(), {textPlain: "x\ny"}) === snap, "consume 同样归一（consume 语义与 resolve 一致）");
         const snapFiles = {...snap, inCodeTarget: false, hasFiles: true};
         const res2 = resolvePasteContext(snapFiles, Date.now(), {textPlain: "其他内容"});
         assert(res2.codeTarget === false && res2.hasFiles === true, "hasFiles 安全标志同样保留", JSON.stringify(res2));
