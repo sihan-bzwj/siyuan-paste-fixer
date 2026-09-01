@@ -129,10 +129,13 @@ async function main() {
         document.body.innerHTML = "";
     }
 
-    console.log("== 4. 跨块（含列表项）：拒绝 ==");
+    console.log("== 4. 跨块：逐块批处理（保留各自 block ID） ==");
     {
         let updateCalls = [];
-        global.fetch = async () => ({ok: true, json: async () => ({code: 0})});
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
         const editor = mkEditor();
         const b1 = mkBlock(editor, "b1", "段落一");
         const b2 = mkBlock(editor, "b2", "段落二");
@@ -141,8 +144,24 @@ async function main() {
         range.setEnd(b2.firstChild, 3);
         const ctx = M.captureManualContext(range, null);
         const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
-        assert(key === "crossBlockRefuse", "跨两段落拒绝", key);
+        assert(key === "noChange", "纯中文正文跨块不转换（looksNotMath 逐块跳过）", key);
         assert(updateCalls.length === 0, "未触发 updateBlock");
+        document.body.innerHTML = "";
+
+        // 两块都是公式文本：逐块转换、保留各自 ID
+        updateCalls = [];
+        const e2 = mkEditor();
+        const m1 = mkBlock(e2, "m1", "x^2+y^2");
+        const m2 = mkBlock(e2, "m2", "\\frac{a}{b}");
+        const r2 = document.createRange();
+        r2.setStart(m1.firstChild, 0);
+        r2.setEnd(m2.firstChild, m2.firstChild.length);
+        const ctx2 = M.captureManualContext(r2, null);
+        const key2 = await M.runManualAction(ctx2, "fix", fixLatexText, convertToPlain);
+        assert(key2 === "done", "两块公式跨块批处理返回 done", key2);
+        assert(updateCalls.length === 2, "两块各自 updateBlock", String(updateCalls.length));
+        assert(updateCalls.map((c) => c.id).join(",") === "m1,m2", "各自的 block ID 保留", process.argv.length ? updateCalls.map((c) => c.id).join(",") : "");
+        assert(updateCalls[0].data === "$x^2+y^2$" && updateCalls[1].data === "$\\frac{a}{b}$", "各自包装为行内公式", JSON.stringify(updateCalls));
         document.body.innerHTML = "";
     }
 
@@ -156,7 +175,7 @@ async function main() {
         range.collapse(true);
         const ctx = M.captureManualContext(range, null);
         const fixKey = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
-        assert(fixKey === "noChange", "已有公式 + fix → noChange", fixKey);
+        assert(fixKey === "alreadyMath", "光标在公式 + 强制转换 → alreadyMath", fixKey);
         assert(block.querySelector('[data-type="inline-math"]') !== null, "点击修复按钮不会反向还原");
         const revertKey = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
         assert(revertKey === "revertDone", "已有公式 + revert → revertDone", revertKey);
@@ -245,7 +264,7 @@ async function main() {
         range.setEnd(mathBlock, mathBlock.childNodes.length);
         const ctx = M.captureManualContext(range, null);
         const fixKey = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
-        assert(fixKey === "noChange", "公式块 + fix → noChange", fixKey);
+        assert(fixKey === "alreadyMath", "公式块 + 强制转换 → alreadyMath", fixKey);
         const revertKey = await M.runManualAction(ctx, "revert", fixLatexText, convertToPlain);
         assert(revertKey === "revertDone", "公式块 + revert → revertDone", revertKey);
         assert(updateCalls.length === 1 && updateCalls[0].id === "mb1" && updateCalls[0].data === "E=mc^2", "还原以原块 id 走 updateBlock", JSON.stringify(updateCalls));
@@ -313,6 +332,42 @@ async function main() {
         assert(key === "blockRichRefuse", "kbd 等未知语义元素 → 整块拒绝", key);
         assert(updateCalls === 0, "未触发 updateBlock");
         assert(domeHtml(block).includes("<kbd>"), "DOM 原样未动");
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 14. 多行段落（<br>）序列化为 \\n → 块级公式 ==");
+    {
+        let updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "bE");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = "x^2<br>+ y^2";
+        editor.appendChild(block);
+        const range = document.createRange();
+        range.setStart(block.firstChild, 0);
+        range.setEnd(block.lastChild, block.lastChild.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "done", "<br> 多行整块强制转换返回 done", key);
+        assert(updateCalls.length === 1 && updateCalls[0].data.includes("$$\n") && updateCalls[0].data.includes("x^2\n+ y^2"),
+            "换行经 <br> 序列化为 \\n 并包装成 $$ 块", JSON.stringify(updateCalls[0]));
+        document.body.innerHTML = "";
+    }
+
+    console.log("== 15. 强制转换保护：普通中文句子拒绝 ==");
+    {
+        const editor = mkEditor();
+        const block = mkBlock(editor, "bF", "这是一个普通中文句子");
+        const range = selectRange(block, 0, block.firstChild.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "looksNotMath", "纯中文句子 → looksNotMath", key);
+        assert(block.textContent === "这是一个普通中文句子", "DOM 原样未动");
         document.body.innerHTML = "";
     }
 

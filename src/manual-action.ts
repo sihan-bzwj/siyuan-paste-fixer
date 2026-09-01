@@ -1,20 +1,28 @@
 /**
- * 手动转换动作层（v0.2.3 拆分自 index.ts）。
+ * 手动转换动作层（v0.2.4 语义重做）。
  *
- * 核心安全原则（与自动粘贴不同，手动操作默认保守）：
- * - 局部选中：把修复结果整段解析成 文本+公式 片段，一次性原地替换 range，
- *   任何非公式正文都不能因为手动修复而消失；
- * - 完整单块：走内核 updateBlock（保留原 block ID）；块内含复杂格式时拒绝，
- *   绝不静默丢加粗/链接/行内代码；
- * - 跨块：拒绝执行，提示逐块操作，绝不 delete+insert 重建；
- * - 光标落在已有公式上：“修复为公式”不动作（已是公式），“还原为纯文本”才还原；
- * - 块级公式出现在局部选择中：提示先选中完整段落。
+ * 与自动粘贴的分工：
+ * - 自动粘贴 → 保守、智能判断，宁可漏掉不乱改；
+ * - 手动操作 → 用户明确表达意图：
+ *   「强制转换为公式」把选中内容包装为公式（先复用修复引擎清破损，单行 → $...$，
+ *   多行 → $$...$$；含可靠数学对的内容保持修复结果，不整体包装）；
+ *   「还原为纯文本」去掉公式定界符。
  *
- * 编辑器（protyleElement）一律从 range 推导（startContainer → closest
- * .protyle-wysiwyg），分屏/多编辑器时不会把 input 发给错误编辑器。
+ * 安全原则：
+ * - 局部选中：结果整段解析成 文本+公式 片段一次性原地替换，正文绝不丢失；
+ * - 完整单块：内核 updateBlock（保留原 block ID）；白名单外元素（加粗/链接/
+ *   行内代码/未知语义节点）一律拒绝，绝不静默丢格式；
+ * - 跨块：逐块批处理——每块独立 updateBlock、保留各自 block ID，不再一刀切拒绝；
+ * - 多行段落（<br>）经 serializeSafeSelection 还原为 \n，不再丢换行；
+ * - 编辑器从 range 推导（分屏不会发给错误编辑器）。
  */
 
-import { tokenizeInlineMath, InlineMathToken } from "./fix-latex";
+import {
+    fixLatexText,
+    MathToken,
+    scanDollarMath,
+    tokenizeMath,
+} from "./fix-latex";
 
 export interface ManualContext {
     /** 右键事件传入 range 的快照（唯一操作上下文） */
@@ -34,7 +42,7 @@ export interface ManualContext {
 export type ManualActionKind =
     | "local-inline"   // 局部行内：原地替换
     | "whole-block"    // 完整单块：updateBlock 保 ID
-    | "cross-block"    // 跨块：拒绝
+    | "cross-block"    // 跨块：逐块批处理
     | "collapsed-at-math" // 光标在公式内：fix 不动作 / revert 还原
     | "collapsed-text"    // 光标在普通文字：提示选择
     | "none";
@@ -98,13 +106,16 @@ export function deriveProtyleElement(range: Range): HTMLElement | null {
     return el.closest(".protyle-wysiwyg") as HTMLElement | null;
 }
 
-/** 统一构建操作上下文（右键/顶栏/命令三个入口共用）。 */
+/**
+ * 统一构建操作上下文（右键/顶栏/命令三个入口共用）。
+ * 编辑器来源：range 推导优先（Range 才是实际操作对象），事件 detail 兜底。
+ */
 export function captureManualContext(range: Range, protyle: unknown): ManualContext {
     const clone = range.cloneRange();
     const detailProtyle = (protyle as {wysiwyg?: {element?: HTMLElement}} | null)?.wysiwyg?.element ?? null;
     return {
         range: clone,
-        protyleElement: detailProtyle ?? deriveProtyleElement(clone),
+        protyleElement: deriveProtyleElement(clone) ?? detailProtyle,
         block: resolveLeafBlock(clone.startContainer),
         endBlock: resolveLeafBlock(clone.endContainer),
         selectedText: clone.toString(),
@@ -114,9 +125,54 @@ export function captureManualContext(range: Range, protyle: unknown): ManualCont
 }
 
 /**
- * 片段是否含“有效内容”（整块判定用）：非空文本、思源语义节点、图像/链接等
- * 都算有效；空 Text、<wbr>/<br>、纯容器节点忽略。
+ * 安全序列化：只允许 文本/br/inline-math/公式块/纯容器，遇到白名单外元素返回 null。
+ * 与整块富格式保护同口径，保证手动操作永远不丢语义节点；<br> 还原为 \n。
  */
+function serializeSafeSelection(root: Node): string | null {
+    if (root.nodeType === 3) {
+        return (root as Text).data;
+    }
+    if (root.nodeType === 11) { // DocumentFragment
+        let out = "";
+        for (const child of root.childNodes) {
+            const s = serializeSafeSelection(child);
+            if (s === null) {
+                return null;
+            }
+            out += s;
+        }
+        return out;
+    }
+    if (root.nodeType !== 1) {
+        return null;
+    }
+    const el = root as Element;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "br") {
+        return "\n";
+    }
+    if (el.getAttribute("data-type") === "inline-math") {
+        return "$" + (el.getAttribute("data-content") || "") + "$";
+    }
+    if (el.getAttribute("data-type") === "NodeMathBlock") {
+        return "$$\n" + (el.getAttribute("data-content") || "") + "\n$$";
+    }
+    if (tag === "div" || tag === "span" || tag === "p") {
+        let out = "";
+        for (const child of el.childNodes) {
+            const s = serializeSafeSelection(child);
+            if (s === null) {
+                return null;
+            }
+            out += s;
+        }
+        return out;
+    }
+    return null; // 白名单之外的一切语义元素：拒绝
+}
+
+/** 片段是否含“有效内容”（整块判定用）：非空文本、思源语义节点、图像/链接等
+ *  都算有效；空 Text、<wbr>/<br>、纯容器节点忽略。 */
 function hasMeaningfulContent(node: Node): boolean {
     if (node.nodeType === 3) {
         return Boolean((node as Text).data.trim());
@@ -180,13 +236,7 @@ export function classifyRange(
     return hasUnselectedContent(block, range) ? "local-inline" : "whole-block";
 }
 
-/**
- * 完整块内是否含白名单之外的语义元素（用于整块转换保护）。
- *
- * fail-closed：整块 updateBlock 只允许 文本节点 / inline-math / 纯容器
- * （div/span/p），其余一切有语义的元素（加粗、链接、行内代码、标签、引用、
- * 以及未来未知的插件 inline 节点）都拒绝转换，绝不静默丢格式。
- */
+/** 块内是否含白名单之外的语义元素（整块转换保护，fail-closed）。 */
 function hasUnsafeRichElement(node: Node): boolean {
     if (node.nodeType === 3) {
         return false;
@@ -199,6 +249,9 @@ function hasUnsafeRichElement(node: Node): boolean {
         return false;
     }
     const tag = el.tagName.toLowerCase();
+    if (tag === "br") {
+        return false; // 多行段落：serialize 会还原为 \n
+    }
     if (tag === "div" || tag === "span" || tag === "p") {
         return Array.from(el.childNodes).some(hasUnsafeRichElement);
     }
@@ -223,20 +276,21 @@ function removeEmptySplitTail(last: Node): void {
     }
 }
 
-/** 局部行内替换：把修复结果整段解析成文本/公式片段，一次替换选区（正文不丢失）。 */
+/** 局部行内替换：把转换结果整段解析成文本/公式片段，一次替换选区（正文不丢失）。 */
 export function applyLocalFragment(
     range: Range,
-    tokens: InlineMathToken[],
+    tokens: MathToken[],
     protyleElement: HTMLElement | null,
 ): void {
     range.deleteContents();
     const frag = document.createDocumentFragment();
     for (const token of tokens) {
-        if (token.math) {
+        if (token.kind === "inline") {
             frag.appendChild(buildInlineMathElement(token.text));
-        } else if (token.text) {
+        } else if (token.kind === "text" && token.text) {
             frag.appendChild(document.createTextNode(token.text));
         }
+        // block token 不应出现在局部替换中（调用方先用 $$ 检查拦截）
     }
     if (!frag.childNodes.length) {
         return;
@@ -256,6 +310,60 @@ export function applyLocalFragment(
     commitEditorChange(protyleElement);
 }
 
+/**
+ * 手动强制转换前的轻量保护：选中内容是否像公式表达式。
+ * 只用于用户明确表达“这就是公式”的场景，不参与自动粘贴分类：
+ * - 已有公式定界符 / LaTeX 命令 / 数学运算符 → 接受；
+ * - 纯中文句子、纯普通英文句子 → 拒绝；
+ * - 中文与数学符号混合（如 \text{核} x_1）→ 接受。
+ */
+export function looksLikeRawMathExpression(source: string): boolean {
+    const t = source.trim();
+    if (!t) {
+        return false;
+    }
+    if (/\$\$|\\\[|\\\]|\\\(|\\\)|\\begin\{/.test(t)) {
+        return true;
+    }
+    if (/\\[A-Za-z]+/.test(t)) {
+        return true;
+    }
+    if (/[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]/.test(t)) {
+        return true;
+    }
+    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(t)) {
+        return false; // 无数学信号的纯中文句子：拒绝
+    }
+    return false;
+}
+
+/**
+ * 手动「强制转换为公式」：
+ * 1. 先复用修复引擎清理破损（\[...\]、\(...\)、== 碎片、\rightarrowEdge 等）；
+ * 2. 修复结果若已含可靠数学对（内容=公式+正文混合，如 "A $x$ B"）→ 直接使用修复结果，
+ *    不整体包装（避免嵌套 $...$）；此时输出**保留原输入（含两侧空格）**，局部选区不丢空格；
+ * 3. 否则把整段内容包装：单行 → $...$，多行 → $$...$$；已是完整公式对则原样。
+ * 返回 null 表示“选中内容不像公式”。
+ */
+export function forceConvertMath(source: string, fixText: (md: string) => string): string | null {
+    if (!looksLikeRawMathExpression(source)) {
+        return null;
+    }
+    const fixed = fixText(source);
+    const t = fixed.trim();
+    if (!t) {
+        return null;
+    }
+    // 混合内容（修复后含可靠数学对）：保持修复结果（原文姿态，空格不丢）
+    if (scanDollarMath(fixed, {multiline: true}).length > 0) {
+        return fixed;
+    }
+    if (t.includes("\n")) {
+        return /^\$\$[\s\S]+\$\$$/.test(t) ? fixed : "$$\n" + t + "\n$$";
+    }
+    return /^\$[^$\n]+\$$/.test(t) ? fixed : "$" + t + "$";
+}
+
 /** 完整单块：内核 updateBlock（保留原 block ID，不删除重建）。 */
 export async function applyWholeBlock(
     block: HTMLElement,
@@ -270,43 +378,103 @@ export async function applyWholeBlock(
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({id, dataType: "markdown", data: markdown}),
     });
+    if (!r.ok) {
+        throw new Error("updateBlock http " + r.status);
+    }
     const j = await r.json() as {code: number, msg?: string};
     if (j.code !== 0) {
         throw new Error(j.msg || "updateBlock failed");
     }
 }
 
+/** 块 → 源码（公式块读 data-content；普通块走安全序列化，<br>→\n）。 */
+function blockSource(block: HTMLElement): string {
+    if (block.getAttribute("data-type") === "NodeMathBlock") {
+        return "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
+    }
+    return serializeSafeSelection(block) ?? "";
+}
+
+/** 被 range 覆盖的叶子块列表（无子块的 [data-node-id]；跨块批处理用）。 */
+function collectIntersectingLeafBlocks(range: Range): HTMLElement[] {
+    const startEl = range.startContainer.nodeType === 1
+        ? range.startContainer as Element
+        : (range.startContainer.parentElement as Element | null);
+    const scope = (startEl?.closest?.(".protyle-wysiwyg") as HTMLElement | null) || document.body;
+    return Array.from(scope.querySelectorAll("[data-node-id]"))
+        .filter((el) => !el.querySelector("[data-node-id]") && range.intersectsNode(el)) as HTMLElement[];
+}
+
 /**
- * 从选区还原源码形态（渲染公式 span 无文本内容，需要从 DOM 取回 $...$ 源码）。
- * 局部选区**绝不 trim**（`A  \(x\)  B` 只选中 ` \(x\) ` 时首尾空格必须保留），
- * 完整块按块语义 trim。
+ * 跨块批处理：每块独立转换、独立 updateBlock（保留各自 block ID）。
+ * 不再一刀切拒绝；含富格式的块跳过，全块不转换时返回对应提示。
+ */
+async function convertBlocks(
+    range: Range,
+    action: "fix" | "revert",
+    fixText: (md: string) => string,
+    convertToPlain: (md: string) => string,
+): Promise<string> {
+    const blocks = collectIntersectingLeafBlocks(range);
+    if (!blocks.length) {
+        return "noSelection";
+    }
+    let changed = 0;
+    let refused = 0;
+    for (const b of blocks) {
+        if (hasRichFormatting(b)) {
+            refused++;
+            continue;
+        }
+        const source = blockSource(b);
+        const trimmed = source.trim();
+        if (!trimmed) {
+            continue;
+        }
+        if (action === "revert") {
+            const out = convertToPlain(source);
+            if (out === source) {
+                continue;
+            }
+            await applyWholeBlock(b, out);
+            changed++;
+        } else {
+            const out = forceConvertMath(source, fixText);
+            if (out === null || out === source) {
+                continue;
+            }
+            await applyWholeBlock(b, out);
+            changed++;
+        }
+    }
+    if (changed === 0 && refused > 0) {
+        return "blockRichRefuse";
+    }
+    return changed > 0 ? "done" : "noChange";
+}
+
+/**
+ * 从选区还原源码形态（safe serializer：唯一会丢换行/格式的路径已封死）。
+ * 遇到白名单外元素返回 null（调用方按“拒绝”处理）。
+ * 局部选区**绝不 trim**（两侧空格必须保留）；完整块由调用方按块语义 trim。
  */
 export function extractSourceMarkdown(
     range: Range,
     block: HTMLElement | null,
     kind: ManualActionKind,
-): string {
+): string | null {
     if (block?.getAttribute("data-type") === "NodeMathBlock") {
         return "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
     }
     const container = document.createElement("div");
     container.appendChild(range.cloneContents());
-    container.querySelectorAll('[data-type="inline-math"]').forEach((m) => {
-        const t = document.createElement("span");
-        t.textContent = "$" + (m as HTMLElement).getAttribute("data-content") + "$";
-        m.replaceWith(t);
-    });
-    container.querySelectorAll('[data-type="NodeMathBlock"]').forEach((m) => {
-        const t = document.createElement("span");
-        t.textContent = "$$\n" + (m as HTMLElement).getAttribute("data-content") + "\n$$";
-        m.replaceWith(t);
-    });
-    const text = container.textContent || "";
-    return kind === "local-inline" ? text : text.trim();
+    return serializeSafeSelection(container);
 }
 
 /**
- * 统一手动动作入口：fix（修复为公式）或 revert（还原为纯文本）。
+ * 统一手动动作入口：
+ * - fix = 强制转换为公式（用户明确意图；先清破损再包装）；
+ * - revert = 还原为纯文本（只还原可靠公式对，金额/Shell 美元不动）。
  * 返回最终给用户的消息 key；失败抛错由调用方兜底提示。
  */
 export async function runManualAction(
@@ -317,10 +485,10 @@ export async function runManualAction(
 ): Promise<string> {
     const kind = classifyRange(ctx.range, ctx.block, ctx.endBlock);
 
-    // 光标在公式内：已有公式时“修复”无意义，只有“还原”才动作
+    // 光标在公式内：强制转换无意义（已是公式），只有“还原”才动作
     if (kind === "collapsed-at-math") {
         if (action === "fix") {
-            return "noChange";
+            return "alreadyMath";
         }
         const node = ctx.range.startContainer.nodeType === 1
             ? ctx.range.startContainer as HTMLElement
@@ -341,29 +509,32 @@ export async function runManualAction(
     if (kind === "collapsed-text" || kind === "none") {
         return "noSelection";
     }
+    // 跨块：逐块批处理（每块保留自己的 block ID）
     if (kind === "cross-block") {
-        return "crossBlockRefuse";
+        return convertBlocks(ctx.range, action, fixText, convertToPlain);
     }
-    // 完整块含复杂格式：宁可拒绝，也不静默丢格式
+    // 完整块含白名单外元素：宁可拒绝，也不静默丢格式
     if (kind === "whole-block" && hasRichFormatting(ctx.block)) {
         return "blockRichRefuse";
     }
 
     const source = extractSourceMarkdown(ctx.range, ctx.block, kind);
+    if (source === null) {
+        return "blockRichRefuse"; // 白名单外元素出现在局部选区
+    }
     if (!source.trim()) {
         return "noSelection";
     }
-    const out = action === "fix" ? fixText(source) : convertToPlain(source);
-    if (out === source) {
-        return "noChange";
-    }
 
-    if (kind === "whole-block") {
-        await applyWholeBlock(ctx.block!, out);
-        return action === "fix" ? "done" : "revertDone";
-    }
-    // local-inline
     if (action === "revert") {
+        const out = convertToPlain(source);
+        if (out === source) {
+            return "noChange";
+        }
+        if (kind === "whole-block") {
+            await applyWholeBlock(ctx.block!, out);
+            return "revertDone";
+        }
         // 局部还原仍走原地替换（结果是纯文本）
         ctx.range.deleteContents();
         const textNode = document.createTextNode(out);
@@ -372,14 +543,23 @@ export async function runManualAction(
         commitEditorChange(ctx.protyleElement);
         return "revertDone";
     }
+
+    // fix = 强制转换为公式
+    const out = forceConvertMath(source, fixText);
+    if (out === null) {
+        return "looksNotMath";
+    }
+    if (out === source) {
+        return "noChange";
+    }
+    if (kind === "whole-block") {
+        await applyWholeBlock(ctx.block!, out);
+        return "done";
+    }
     if (/\$\$/.test(out)) {
         return "blockNeedsWholeBlock"; // 局部选中出现块级公式：提示选整段
     }
-    // 局部行内修复：整个结果为片段（正文与公式全部保留）
-    const tokens = tokenizeInlineMath(out);
-    if (!tokens.some((t) => t.math)) {
-        return "noChange";
-    }
-    applyLocalFragment(ctx.range, tokens, ctx.protyleElement);
+    // 局部行内：整段结果（文本+公式）片段替换
+    applyLocalFragment(ctx.range, tokenizeMath(out), ctx.protyleElement);
     return "done";
 }

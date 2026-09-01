@@ -1,6 +1,7 @@
 import { Menu, Plugin, showMessage } from "siyuan";
 import type { IEventBusMap } from "siyuan";
 import {
+    convertMathToPlainText,
     fixLatexText,
     maskLuteUnsafeDollars,
     maskProtectedSegments,
@@ -22,16 +23,6 @@ import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
 
 type PasteDetail = IEventBusMap["paste"];
 
-/** 把标准公式形态还原为纯文本（右键"还原为纯文本"）：$$/$ 去定界符、包装花括号还原。 */
-function convertMathToPlainText(text: string): string {
-    return text
-        .replace(/\$\$([\s\S]+?)\$\$/g, (_m, inner: string) => inner.trim())
-        .replace(/\$([^$\n\u0001\u0002]+?)\$/g, (_m, inner: string) => {
-            const core = inner.trim();
-            return /^\{.*\}$/.test(core) ? core.slice(1, -1) : core;
-        });
-}
-
 /**
  * 单通道粘贴修复：
  * 1. 原生 paste 事件只做只读上下文快照（代码块目标/编辑器/文件/文本），
@@ -51,8 +42,6 @@ export default class PasteFixer extends Plugin {
     private pasteSnapshot: PasteContextSnapshot | null = null;
     /** 最近一次编辑器内选区（顶栏/命令菜单打开后 selection 可能被拿走，用快照兜底） */
     private lastEditorRange: Range | null = null;
-    /** 顶栏菜单打开瞬间的选区快照（点击菜单项时不再读可能已失效的 selection） */
-    private quickMenuContext: ManualContext | null = null;
     /** 插件已卸载：异步 bootstrap 中途卸载时不再注册任何监听器 */
     private disposed = false;
 
@@ -233,8 +222,6 @@ export default class PasteFixer extends Plugin {
     /** 顶栏按钮弹出开关菜单（仿 text-process）：每个开关都真实改变行为。 */
     private showQuickMenu(): void {
         try {
-            // 打开瞬间捕获选区快照：菜单点击时 selection 可能已被拿走
-            this.quickMenuContext = this.currentEditorContext();
             let btn: HTMLElement | null = this.topBarElement;
             const b = btn && btn.getBoundingClientRect();
             if (!btn || (b && b.width === 0)) {
@@ -276,17 +263,6 @@ export default class PasteFixer extends Plugin {
                     void saveSettingsToFile(this.settings);
                     setTimeout(() => this.showQuickMenu(), 60);
                 },
-            });
-            menu.addSeparator();
-            menu.addItem({
-                icon: "iconMath",
-                label: this.i18n.menuConvert,
-                click: () => void this.runSelectionAction("fix", this.quickMenuContext),
-            });
-            menu.addItem({
-                icon: "iconMath",
-                label: this.i18n.menuRevert,
-                click: () => void this.runSelectionAction("revert", this.quickMenuContext),
             });
             if (rect) {
                 menu.open({x: Math.round(rect.right - 240), y: Math.round(rect.bottom + 8)});

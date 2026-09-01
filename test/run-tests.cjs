@@ -347,6 +347,22 @@ async function main() {
         assert(false, "断词后的 boxed 公式 KaTeX 可解析", e.message);
     }
 
+    console.log("== 7. 跨行 $...$ 自动升级 $$...$$（统一扫描器） ==");
+    let multi = fixLatexText("$x+y\nz+w$");
+    assert(multi === "$$\nx+y\nz+w\n$$", "跨行可靠公式升级块级", JSON.stringify(multi));
+    multi = fixLatexText("$\n\\frac{a}{b}\n+\n\\frac{c}{d}\n$");
+    assert(multi === "$$\n\\frac{a}{b}\n+\n\\frac{c}{d}\n$$", "多行公式（含命令）升级", JSON.stringify(multi));
+    multi = fixLatexText("价格 $5\n第二天花了 $10");
+    assert(multi === "价格 $5\n第二天花了 $10", "金额跨行绝不配对", JSON.stringify(multi));
+    multi = fixLatexText("$\n5\n10\n$");
+    assert(multi === "$\n5\n10\n$", "纯数字堆叠不配对（无数学信号）", JSON.stringify(multi));
+    multi = fixLatexText("$x\n\ny$");
+    assert(multi === "$x\n\ny$", "空行（段落边界）不跨", JSON.stringify(multi));
+    multi = fixLatexText("$HOME\n变量");
+    assert(multi === "$HOME\n变量", "Shell 变量跨行不配对", JSON.stringify(multi));
+    multi = fixLatexText("单行 $x^2$ 测试");
+    assert(multi === "单行 $x^2$ 测试", "单行公式保持行内（不升级）", JSON.stringify(multi));
+
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }

@@ -85,7 +85,11 @@ const STRONG_TOKEN_RE = /\\(?:frac|dfrac|sum|int|prod|sqrt|mathbb|left|right|tex
 const MATH_SIGNALS_RE = /\$\$|\\\[|\\\]|\\\(|\\\)|\\begin\{|\\boxed\{|\\underbrace\{|\\frac\{|<math[\s>]|\\\\[a-zA-Z]|\\[_=^]/i;
 
 export function looksLikeMath(text: string): boolean {
-    return MATH_SIGNALS_RE.test(text) || (text.match(/\$/g) || []).length >= 2;
+    // 强定界符信号；或至少存在一对可靠 $...$（不再简单数 $，金额/Shell 不误判）
+    if (MATH_SIGNALS_RE.test(text)) {
+        return true;
+    }
+    return scanDollarMath(text.slice(0, 4000), {multiline: false}).length > 0;
 }
 
 /** 双反斜杠折叠白名单：只有这些命令前的 \\ 才可能是 Markdown 转义损伤（\\frac → \frac）。
@@ -504,25 +508,21 @@ function fixTextSegment(seg: string): string {
     // 1. 先保护已有公式。这样不规范的 $x+\(y\)+z$ 不会被改成嵌套美元公式。
     s = s.replace(BLOCK_DOLLAR_RE, (_m, inner: string) =>
         contains(inner) ? _m : hold("$$" + fixInsideMath(inner) + "$$"));
-    // 行内 $...$：手工扫描。当配对内容"两侧空格且不像数学"（金额等）时只消费开头的 $，
-    // 让后续 $ 有机会与更近的闭合配对（"费用 $ 100 与公式 $ x $" 中 $x$ 仍能转换）。
+    // 行内 $...$：统一扫描器。单行可靠对 → 行内公式；跨行可靠对 → 升级块级
+    // （与 \( ... \) 跨行升级行为对齐）。金额、Shell、未闭合美元不配对，原样保留。
     {
+        const matches = scanDollarMath(s, {multiline: true});
         let outText = "";
         let pos = 0;
-        INLINE_DOLLAR_RE.lastIndex = 0;
-        let inlineMatch: RegExpExecArray | null;
-        while ((inlineMatch = INLINE_DOLLAR_RE.exec(s))) {
-            const inner = inlineMatch[1];
-            const fixedInner = fixInlineMath(inner);
-            if (/^\s/.test(inner) && /\s$/.test(inner) &&
-                !looksLikeInlineTrimCore(inner.trim()) && fixedInner === inner) {
-                outText += s.slice(pos, inlineMatch.index + 1);
-                pos = inlineMatch.index + 1;
-                INLINE_DOLLAR_RE.lastIndex = pos;
-                continue;
+        for (const m of matches) {
+            outText += s.slice(pos, m.start);
+            if (m.multiline) {
+                // 跨行 $...$ 自动升级为 $$...$$（Lute 只解析行内数学，块级必须手工切出）
+                outText += hold("$$\n" + fixInsideMath(m.content.trim()) + "\n$$");
+            } else {
+                outText += hold("$" + luteSafeInline(fixInlineMath(m.content)) + "$");
             }
-            outText += s.slice(pos, inlineMatch.index) + hold("$" + luteSafeInline(fixedInner) + "$");
-            pos = inlineMatch.index + inlineMatch[0].length;
+            pos = m.end;
         }
         s = outText + s.slice(pos);
     }
@@ -808,54 +808,171 @@ export interface InlineMathToken {
     text: string;
 }
 
+export interface DollarMathMatch {
+    start: number;
+    /** 闭合定界符之后的位置（end 指向下一个待处理字符） */
+    end: number;
+    /** 不含定界符的公式本体（块级含多行） */
+    content: string;
+    kind: "inline" | "block";
+    /** 单 `$` 对跨了软换行（仅 multiline 模式出现；调用方决定升级块级） */
+    multiline: boolean;
+}
+
+export interface ScanDollarOptions {
+    /** 允许单 `$` 对跨软换行（内容须通过 isReliableMultilineDollar） */
+    multiline?: boolean;
+    /** 跨行最大行数（默认 16）与最大跨距（默认 2000），防误配与 O(n²) */
+    maxLines?: number;
+    maxLength?: number;
+}
+
+export type MathToken =
+    | {kind: "text", text: string}
+    | {kind: "inline", text: string}
+    | {kind: "block", text: string};
+
 /**
- * 把文本按可靠的 `$...$` 数学对切成片段（供手动转换、公式计数等共用）。
- *
- * 配对规则与 maskLuteUnsafeDollars 的行内分支一致（同一行、未转义闭合、内容
- * 通过 isReliableDollarPair）：`$5 and $10`、未闭合美元、转义美元都按普通文本
- * 保留，避免金额/Shell 变量被误当成公式。块级 `$$...$$` 不属于行内配对，原样
- * 留在文本片段中，由调用方决定如何处理。
+ * 跨行 `$...$` 内容可靠性（多行升级块级前的最后一道闸）：
+ * - 不跨空行（\n\n 即段落边界）、不超过行数/长度上限；
+ * - 不含中文/全角（金额/正文句不会误配）；
+ * - 至少一行含强数学信号（LaTeX 命令/下标/运算符）——纯数字堆叠
+ *   （`$5\n10$`）不会被当成公式。
  */
-export function tokenizeInlineMath(markdown: string): InlineMathToken[] {
-    const out: InlineMathToken[] = [];
-    let buf = "";
+function isReliableMultilineDollar(content: string): boolean {
+    const core = content.trim();
+    if (!core || core.length > 2000 || core.includes("\n\n")) {
+        return false;
+    }
+    const lines = core.split("\n");
+    if (lines.length > 16 || !lines.every((l) => l.trim())) {
+        return false;
+    }
+    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core)) {
+        return false;
+    }
+    return lines.some((l) => /\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]/.test(l));
+}
+
+/**
+ * 统一的 `$` 配对扫描器：全项目唯一判定口径。
+ *
+ * 语义（fail-closed，与历史行为一致）：
+ * - 完整 `$$...$$` → block（跨行天然允许；未闭合 `$$` 不配对）；
+ * - 单 `$` 同行找闭合（不穿过占位符 \u0001/\u0002 与行内代码边界），内容通过
+ *   isReliableDollarPair 才配对；
+ * - multiline=true 时单 `$` 可跨软换行（不跨空行），内容通过
+ *   isReliableMultilineDollar 才配对；
+ * - 不可靠候选只跳过开头 `$`，下一枚 `$` 仍可与更近的闭合配对
+ *   （"费用 $ 100 与公式 $ x $" 中 $x$ 仍能识别）。
+ */
+export function scanDollarMath(text: string, options: ScanDollarOptions = {}): DollarMathMatch[] {
+    const out: DollarMathMatch[] = [];
+    const maxLines = options.maxLines ?? 16;
+    const maxLength = options.maxLength ?? 2000;
     let i = 0;
-    while (i < markdown.length) {
-        if (markdown[i] === "$" && !isEscapedDollar(markdown, i)) {
-            if (markdown[i + 1] === "$") {
-                // 块级 $$...$$ 原子跳过：整块留在文本段，不参与行内配对
-                let close = i + 2;
-                while ((close = markdown.indexOf("$$", close)) >= 0) {
-                    if (!isEscapedDollar(markdown, close)) {
-                        break;
-                    }
-                    close += 2;
+    while (i < text.length) {
+        if (text[i] !== "$" || isEscapedDollar(text, i)) {
+            i++;
+            continue;
+        }
+        // 块级 $$
+        if (text[i + 1] === "$" && !isEscapedDollar(text, i + 1)) {
+            let close = i + 2;
+            while ((close = text.indexOf("$$", close)) >= 0) {
+                if (!isEscapedDollar(text, close)) {
+                    break;
                 }
-                const end = close >= 0 ? close + 2 : markdown.length;
-                buf += markdown.slice(i, end);
-                i = end;
+                close += 2;
+            }
+            if (close >= 0) {
+                out.push({start: i, end: close + 2, content: text.slice(i + 2, close), kind: "block", multiline: false});
+                i = close + 2;
                 continue;
             }
-            let close = i + 1;
-            while (close < markdown.length && markdown[close] !== "\n") {
-                if (markdown[close] === "$" && !isEscapedDollar(markdown, close)) {
+            i += 2; // 未闭合 $$：不配对
+            continue;
+        }
+        // 单 $：同行找闭合；multiline 时允许跨软换行但限制行数
+        let close = i + 1;
+        let sawNl = false;
+        let lineCount = 1;
+        while (close < text.length) {
+            const ch = text[close];
+            if (ch === "\n") {
+                if (!options.multiline) {
+                    break;
+                }
+                sawNl = true;
+                lineCount++;
+                if (lineCount > maxLines) {
                     break;
                 }
                 close++;
+                continue;
             }
-            if (close < markdown.length && markdown[close] === "$" &&
-                isReliableDollarPair(markdown.slice(i + 1, close))) {
-                if (buf) {
-                    out.push({math: false, text: buf});
-                    buf = "";
-                }
-                out.push({math: true, text: markdown.slice(i + 1, close)});
+            if (ch === "\u0001" || ch === "\u0002") {
+                break; // 已完成公式占位符是新边界，不跨配对
+            }
+            if (ch === "$" && !isEscapedDollar(text, close)) {
+                break;
+            }
+            close++;
+        }
+        if (close < text.length && text[close] === "$" && close - i <= maxLength) {
+            const content = text.slice(i + 1, close);
+            const ok = sawNl ? isReliableMultilineDollar(content) : isReliableDollarPair(content);
+            if (ok) {
+                out.push({start: i, end: close + 1, content, kind: "inline", multiline: sawNl});
                 i = close + 1;
                 continue;
             }
         }
-        buf += markdown[i];
-        i++;
+        i++; // 不可靠候选：只跳过开头 $，下一枚仍可配对
+    }
+    return out;
+}
+
+/**
+ * 把文本按可靠的数学对切成 token（text/inline/block），供手动转换、
+ * 公式计数、还原为纯文本等共用；配对口径与 maskLuteUnsafeDollars 一致。
+ */
+export function tokenizeMath(markdown: string, options: ScanDollarOptions = {}): MathToken[] {
+    const matches = scanDollarMath(markdown, options);
+    const out: MathToken[] = [];
+    let pos = 0;
+    for (const m of matches) {
+        if (m.start > pos) {
+            out.push({kind: "text", text: markdown.slice(pos, m.start)});
+        }
+        out.push(m.kind === "block" ? {kind: "block", text: m.content} : {kind: "inline", text: m.content});
+        pos = m.end;
+    }
+    if (pos < markdown.length) {
+        out.push({kind: "text", text: markdown.slice(pos)});
+    }
+    return out;
+}
+
+/**
+ * 行内 token 兼容导出（旧 {math,text} 格式；块级 $$ 保持并入文本段，
+ * 与历史行为一致，供公式计数等调用方使用）。
+ */
+export function tokenizeInlineMath(markdown: string): InlineMathToken[] {
+    const out: InlineMathToken[] = [];
+    let buf = "";
+    for (const t of tokenizeMath(markdown, {multiline: false})) {
+        if (t.kind === "text") {
+            buf += t.text;
+        } else if (t.kind === "block") {
+            buf += "$$" + t.text + "$$";
+        } else {
+            if (buf) {
+                out.push({math: false, text: buf});
+                buf = "";
+            }
+            out.push({math: true, text: t.text});
+        }
     }
     if (buf) {
         out.push({math: false, text: buf});
@@ -870,74 +987,40 @@ export function tokenizeInlineMath(markdown: string): InlineMathToken[] {
  * 修复文本若直接交给 Lute，它可能从第一个 `$` 一直配到最后一个 `$`，于是
  * 中间那个合法闭合符落入数学内容，KaTeX 报 “Can't use function '$'”。
  *
- * 扫描策略是 fail-closed：
- * - 完整 `$$...$$` 原样交给 Lute；未闭合 `$$` 遮蔽；
- * - 单美元只在内容可靠像数学时成对保留；否则先遮蔽当前 `$`，再从下一个
- *   美元重试，使 `费用 $ 100 与公式 $ x $` 仍能识别最后的 `$ x $`；
- * - 遮蔽只用于 Markdown→DOM 的中间过程。Lute 解析完后恢复为普通文本，
- *   因而用户看到的字符不变，也不改变 fixLatexText 的逐字保留约定。
+ * 遮蔽集合 = 所有未被 scanDollarMath 判定为可靠配对的美元位置（含未闭合 `$$`
+ * 的两个字符）；行内配对与完整块级对维持单行语义，不被破坏。遮蔽只用于
+ * Markdown→DOM 的中间过程。Lute 解析完后恢复为普通文本，因而用户看到的
+ * 字符不变，也不改变 fixLatexText 的逐字保留约定。
  *
  * 调用方应先用 maskProtectedSegments 遮蔽代码、链接和 URL，再把其 masked
  * 结果传入本函数，避免检查这些保护结构内部本来就无需解析的美元符号。
  */
 export function maskLuteUnsafeDollars(text: string): DollarMaskResult {
-    let salt = 0;
-    while (text.includes(`\u0001PFD${salt}:`)) {
-        salt++;
-    }
-    const prefix = `\u0001PFD${salt}:`;
+    const pairs = scanDollarMath(text, {multiline: false});
     const unsafe = new Set<number>();
-    let i = 0;
-
-    while (i < text.length) {
-        if (text[i] !== "$" || isEscapedDollar(text, i)) {
-            i++;
+    let pairIdx = 0;
+    for (let pos = 0; pos < text.length; pos++) {
+        if (text[pos] !== "$" || isEscapedDollar(text, pos)) {
             continue;
         }
-
-        // 块级 $$：只接受同一段中真实闭合的下一组 $$。
-        if (text[i + 1] === "$" && !isEscapedDollar(text, i + 1)) {
-            let close = i + 2;
-            while ((close = text.indexOf("$$", close)) >= 0) {
-                if (!isEscapedDollar(text, close)) {
-                    break;
-                }
-                close += 2;
-            }
-            if (close >= 0) {
-                i = close + 2;
-                continue;
-            }
-            unsafe.add(i);
-            unsafe.add(i + 1);
-            i += 2;
-            continue;
+        while (pairIdx < pairs.length && pairs[pairIdx].end <= pos) {
+            pairIdx++;
         }
-
-        // 行内 $：只在本行寻找下一个未转义的单美元作为候选闭合符。
-        let close = i + 1;
-        while (close < text.length && text[close] !== "\n") {
-            // 紧邻公式 `$x$$y$` 的中间两枚美元分别是前式闭合和后式开头，
-            // 因此候选闭合符后面即使还是 `$` 也不能跳过。
-            if (text[close] === "$" && !isEscapedDollar(text, close)) {
-                break;
-            }
-            close++;
+        const cur = pairs[pairIdx];
+        if (cur && pos >= cur.start && pos < cur.end) {
+            continue; // 属于可靠配对（含 $$ 双字符）
         }
-        if (close < text.length && text[close] === "$" &&
-            isReliableDollarPair(text.slice(i + 1, close))) {
-            i = close + 1;
-            continue;
-        }
-
-        // 当前候选不可靠时只遮蔽开头，下一枚 $ 仍可与其后的定界符配对。
-        unsafe.add(i);
-        i++;
+        unsafe.add(pos);
     }
 
     if (!unsafe.size) {
         return {masked: text, count: 0, restore: (s: string) => s};
     }
+    let salt = 0;
+    while (text.includes(`\u0001PFD${salt}:`)) {
+        salt++;
+    }
+    const prefix = `\u0001PFD${salt}:`;
     let tokenIndex = 0;
     const parts: string[] = [];
     for (let pos = 0; pos < text.length; pos++) {
@@ -996,6 +1079,24 @@ export function fixLatexText(text: string): string {
     let out = "";
     for (const segment of splitMarkdownSegments(text)) {
         out += segment.protected ? segment.text : fixTextSegment(segment.text);
+    }
+    return out;
+}
+
+/**
+ * 把标准公式形态还原为纯文本（右键"还原为纯文本"）：$$/$ 去定界符、
+ * 包装花括号还原。基于统一 tokenizeMath——只有可靠数学对才还原，
+ * 金额/Shell 美元保持原样。
+ */
+export function convertMathToPlainText(text: string): string {
+    let out = "";
+    for (const t of tokenizeMath(text, {multiline: true})) {
+        if (t.kind === "text") {
+            out += t.text;
+            continue;
+        }
+        const core = t.text.trim();
+        out += /^\{.*\}$/.test(core) ? core.slice(1, -1) : core;
     }
     return out;
 }

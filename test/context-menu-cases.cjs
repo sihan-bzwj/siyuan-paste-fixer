@@ -1,7 +1,7 @@
-// v0.2.3 右键菜单专项测试（src/context-menu.ts，第二轮：common-menu-open 事件化）
-// 覆盖审查要求：菜单单例复用（预先存在同一个 .b3-menu）、连续 10 次无重复项/
-// 残余 separator、open-menu-content 优先接管、dispose 清 owned 标记、
-// 末班车 DOM 注入、跨编辑器选区不信任。
+// v0.2.4 右键菜单专项测试（src/context-menu.ts：common-menu-open 事件化 + 上下文项）
+// 覆盖：菜单单例复用（预先存在同一个 .b3-menu）、连续 10 次无重复项/残余 separator、
+// open-menu-content 优先接管、dispose 清 owned 标记、末班车 DOM 注入、
+// 跨编辑器选区不信任、按上下文显示菜单项（选区=强制转换/公式=还原/光标内=还原/无选区=不显示）。
 const path = require("path");
 const esbuild = require("esbuild");
 const { JSDOM } = require("jsdom");
@@ -51,7 +51,7 @@ async function main() {
     global.MutationObserver = dom.window.MutationObserver;
     global.getSelection = () => dom.window.getSelection();
 
-    const i18n = {menuConvert: "修复为公式", menuRevert: "还原为纯文本", fail: "转换失败", noSelection: "请先选中"};
+    const i18n = {menuConvert: "强制转换为公式", menuRevert: "还原为纯文本", fail: "转换失败", noSelection: "请先选中"};
     const mkEditor = () => {
         const editor = document.createElement("div");
         editor.className = "protyle-wysiwyg";
@@ -93,98 +93,173 @@ async function main() {
     const rightClick = (block) => {
         block.dispatchEvent(new dom.window.MouseEvent("contextmenu", {bubbles: true, cancelable: true}));
     };
+    const selectIn = (block, start = 0, end) => {
+        const sel = dom.window.getSelection();
+        sel.removeAllRanges();
+        const range = document.createRange();
+        range.setStart(block.firstChild, start);
+        range.setEnd(block.firstChild, end !== undefined ? end : block.firstChild.length);
+        sel.addRange(range);
+        return range;
+    };
+    const actions = (menu) => Array.from(menu.querySelectorAll("[data-paste-fixer-action]")).map((el) => el.getAttribute("data-paste-fixer-action"));
 
-    console.log("== 1. 菜单单例复用：common-menu-open 注入到已存在的同一菜单 ==");
+    console.log("== 1. 菜单单例复用：有选区时注入「强制转换为公式」 ==");
     {
         const editor = mkEditor();
-        const block = mkBlock(editor, "b1", "选中文本");
+        const block = mkBlock(editor, "b1", "x^2 文本");
         const {handlers} = makeHandlers();
         const menu = mkSingletonMenu(); // 菜单在右键**之前**就存在（真实思源单例）
+        selectIn(block);
         rightClick(block);
         handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
         const owned = menu.querySelectorAll("[data-paste-fixer-owned]");
-        assert(owned.length === 3, "注入 3 个 owned 节点（分隔线+两项）", String(owned.length));
+        assert(owned.length === 2, "注入 2 个 owned 节点（分隔线+一项）", String(owned.length));
+        assert(actions(menu).join(",") === "fix", "只有「强制转换为公式」", actions(menu).join(","));
         assert(menu.querySelectorAll(".b3-menu__separator").length === 1, "恰好一个 separator");
-        const texts = Array.from(menu.querySelectorAll(".b3-menu__text")).map((el) => el.textContent);
-        assert(texts.includes("修复为公式") && texts.includes("还原为纯文本"), "两项标签正确", texts.join(","));
         done(handlers);
     }
 
-    console.log("== 2. API 路径：common-menu-open 的 menu 带 addItem 时用 API ==");
+    console.log("== 2. 选区覆盖公式节点：两项都显示 ==");
     {
         const editor = mkEditor();
-        const block = mkBlock(editor, "b2", "text");
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "b2");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = '前 <span data-type="inline-math" data-subtype="math" data-content="x_i"></span> 后';
+        editor.appendChild(block);
         const {handlers} = makeHandlers();
+        const menu = mkSingletonMenu();
+        selectIn(block, 0, block.childNodes.length === 0 ? 0 : undefined);
+        // 全选：跨文本节点建 range
+        const range = document.createRange();
+        range.setStart(block.firstChild, 0);
+        range.setEnd(block.lastChild, block.lastChild.length);
+        const sel = dom.window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        rightClick(block);
+        handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
+        assert(actions(menu).sort().join(",") === "fix,revert", "混合选区两项都出（强制转换+还原）", actions(menu).sort().join(","));
+        done(handlers);
+    }
+
+    console.log("== 3. 光标在公式内：只「还原为纯文本」 ==");
+    {
+        const editor = mkEditor();
+        const block = document.createElement("div");
+        block.setAttribute("data-node-id", "b3");
+        block.setAttribute("data-type", "NodeParagraph");
+        block.innerHTML = '<span data-type="inline-math" data-subtype="math" data-content="x_i"></span>';
+        editor.appendChild(block);
+        const {handlers} = makeHandlers();
+        const menu = mkSingletonMenu();
+        const span = block.querySelector('[data-type="inline-math"]');
+        const range = document.createRange();
+        range.setStart(span, 0);
+        range.collapse(true);
+        const sel = dom.window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        rightClick(block);
+        handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
+        assert(actions(menu).join(",") === "revert", "光标在公式内只有「还原为纯文本」", actions(menu).join(","));
+        done(handlers);
+    }
+
+    console.log("== 4. 普通文字且无选择：不显示公式操作 ==");
+    {
+        const editor = mkEditor();
+        const block = mkBlock(editor, "b4", "普通文字");
+        const {handlers} = makeHandlers();
+        const menu = mkSingletonMenu();
+        rightClick(block); // 无选区 → collapsed 在普通文字
+        handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
+        assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 0, "不注入任何项", String(menu.querySelectorAll("[data-paste-fixer-owned]").length));
+        done(handlers);
+    }
+
+    console.log("== 5. API 路径：common-menu-open 的 menu 带 addItem 时用 API ==");
+    {
+        const editor = mkEditor();
+        const block = mkBlock(editor, "b5", "x^2");
+        const {handlers} = makeHandlers();
+        selectIn(block);
         rightClick(block);
         let apiCalls = 0;
         handlers.onCommonMenuOpen({detail: {menu: {addItem: () => apiCalls++}}});
-        assert(apiCalls === 2, "menu.addItem 调用两次", String(apiCalls));
+        assert(apiCalls === 1, "menu.addItem 调用一次（仅 fix）", String(apiCalls));
         done(handlers);
     }
 
-    console.log("== 3. 连续 10 次右键复用同一菜单：无重复项/残余 separator ==");
+    console.log("== 6. 连续 10 次右键复用同一菜单：无重复项/残余 separator ==");
     {
         const editor = mkEditor();
-        const block = mkBlock(editor, "b3", "text");
+        const block = mkBlock(editor, "b6", "x^2");
         const {handlers} = makeHandlers();
         const menu = mkSingletonMenu();
         for (let i = 1; i <= 10; i++) {
+            selectIn(block);
             rightClick(block);
             handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
             const owned = menu.querySelectorAll("[data-paste-fixer-owned]");
-            if (owned.length !== 3) {
+            if (owned.length !== 2) {
                 assert(false, `第 ${i} 次右键 owned 节点数`, String(owned.length));
                 break;
             }
         }
-        assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 3, "10 次后仍只有 3 个 owned 节点");
+        assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 2, "10 次后仍只有 2 个 owned 节点");
         assert(menu.querySelectorAll(".b3-menu__separator").length === 1, "10 次后仍只有 1 个 separator（无残余）");
-        assert(menu.querySelectorAll(".b3-menu__item").length === 2, "10 次后仍只有 2 个按钮");
+        assert(menu.querySelectorAll(".b3-menu__item").length === 1, "10 次后仍只有 1 个按钮");
         const tips = Array.from(menu.querySelectorAll("[data-paste-fixer-interaction]"))
             .map((el) => el.getAttribute("data-paste-fixer-interaction"));
         assert(new Set(tips).size === 1, "只剩最后一次 interaction 的注入项", tips.join(","));
         done(handlers);
     }
 
-    console.log("== 4. open-menu-content 优先：handled 后 common-menu-open 不再注入 ==");
+    console.log("== 7. open-menu-content 优先：handled 后 common-menu-open 不再注入 ==");
     {
         const editor = mkEditor();
-        const block = mkBlock(editor, "b4", "text");
+        const block = mkBlock(editor, "b7", "x^2");
         const {handlers} = makeHandlers();
+        selectIn(block);
         rightClick(block); // 武装
         let apiCalls = 0;
         const range = document.createRange();
         range.setStart(block.firstChild, 0);
         range.setEnd(block.firstChild, 2);
         handlers.onOpenMenuContent({detail: {menu: {addItem: () => apiCalls++}, range}});
-        assert(apiCalls === 2, "官方通路 addItem 两次", String(apiCalls));
+        assert(apiCalls === 1, "官方通路 addItem 一次（上下文）", String(apiCalls));
         handlers.onCommonMenuOpen({detail: {menu: {element: null}}});
         const menu = mkSingletonMenu();
+        selectIn(block);
         assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 0, "官方通路到达后 common-menu-open 不再注入");
         done(handlers);
     }
 
-    console.log("== 5. 末班车：两个事件都不触发，超时后注入当前可见菜单 ==");
+    console.log("== 8. 末班车：两个事件都不触发，超时后注入当前可见菜单 ==");
     {
         const editor = mkEditor();
-        const block = mkBlock(editor, "b5", "text");
+        const block = mkBlock(editor, "b8", "x^2");
         const {handlers} = makeHandlers();
         const menu = mkSingletonMenu();
+        selectIn(block);
         rightClick(block);
         await new Promise((r) => setTimeout(r, 650)); // 超过 500ms 观察窗
-        assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 3, "末班车 DOM 注入出现", String(menu.querySelectorAll("[data-paste-fixer-owned]").length));
+        assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 2, "末班车 DOM 注入出现", String(menu.querySelectorAll("[data-paste-fixer-owned]").length));
         done(handlers);
     }
 
-    console.log("== 6. dispose：清掉 owned 标记（含 separator），无计时器残留 ==");
+    console.log("== 9. dispose：清掉 owned 标记（含 separator），无计时器残留 ==");
     {
         const editor = mkEditor();
-        const block = mkBlock(editor, "b6", "text");
+        const block = mkBlock(editor, "b9", "x^2");
         const {handlers} = makeHandlers();
         const menu = mkSingletonMenu();
+        selectIn(block);
         rightClick(block);
         handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
-        assert(document.querySelectorAll("[data-paste-fixer-owned]").length === 3, "dispose 前有注入项");
+        assert(document.querySelectorAll("[data-paste-fixer-owned]").length === 2, "dispose 前有注入项");
         handlers.dispose();
         await new Promise((r) => setTimeout(r, 650));
         assert(document.querySelectorAll("[data-paste-fixer-owned]").length === 0, "dispose 清除所有 owned 节点（按钮+分隔线）");
@@ -193,7 +268,7 @@ async function main() {
         done(handlers);
     }
 
-    console.log("== 7. 跨编辑器选区不信任：fallback 用目标处 collapsed 选区 ==");
+    console.log("== 10. 跨编辑器选区不信任：fallback 用目标处 collapsed 选区 ==");
     {
         const editor1 = mkEditor();
         const t1 = mkBlock(editor1, "t1", "左编辑器选中");
@@ -205,29 +280,23 @@ async function main() {
         const sel = dom.window.getSelection();
         sel.removeAllRanges();
         sel.addRange(selRange);
-        const {handlers, messages} = makeHandlers();
-        rightClick(t2);
+        const {handlers} = makeHandlers();
+        rightClick(t2); // 选区在左编辑器，与右键目标不同 → 忽略
         const menu = mkSingletonMenu();
         handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
-        menu.querySelector('[data-paste-fixer-owned][data-paste-fixer-action="fix"]').click();
-        await tick();
-        assert(messages.length === 1 && messages[0] === "请先选中", "用右编辑器 collapsed 选区执行（提示选择）", messages.join(","));
+        assert(menu.querySelectorAll("[data-paste-fixer-owned]").length === 0, "跨编辑器选区不信任：无项（视为无选区）");
         done(handlers);
     }
 
-    console.log("== 8. 同一编辑器选区可信：直接作用于选区 ==");
+    console.log("== 11. 同一编辑器选区可信：直接作用于选区 ==");
     {
         const editor = mkEditor();
-        const block = mkBlock(editor, "t8", "A \\(x\\) B");
-        const selRange = document.createRange();
-        selRange.setStart(block.firstChild, 0);
-        selRange.setEnd(block.firstChild, block.firstChild.length);
-        const sel = dom.window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(selRange);
-        let updateCalls = 0;
+        const block = mkBlock(editor, "t11", "A \\(x\\) B");
+        const range = selectIn(block, 0, block.firstChild.length);
+        void range;
+        let updateCalls = [];
         global.fetch = async (url, opts) => {
-            if (String(url).includes("updateBlock")) updateCalls++;
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
             return {ok: true, json: async () => ({code: 0})};
         };
         const {handlers, messages} = makeHandlers();
@@ -236,7 +305,8 @@ async function main() {
         handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
         menu.querySelector('[data-paste-fixer-action="fix"]').click();
         await tick();
-        assert(updateCalls === 1, "整块选区走 updateBlock（选区被采用）", String(updateCalls));
+        assert(updateCalls.length === 1, "整块选区走 updateBlock（选区被采用）", String(updateCalls.length));
+        assert(updateCalls[0].data.includes("$x$"), "破损定界符清理后包装", updateCalls[0].data);
         assert(messages.length === 1 && messages[0] === "done", "提示 done", messages.join(","));
         done(handlers);
     }

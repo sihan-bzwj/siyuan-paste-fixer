@@ -13,7 +13,7 @@
  * 菜单复用时不会残留空分隔线。手动动作一律使用右键事件的 range 快照。
  */
 
-import { captureManualContext, ManualContext, runManualAction } from "./manual-action";
+import { captureManualContext, collapsedAtMath, ManualContext, runManualAction } from "./manual-action";
 
 export interface MenuDeps {
     i18n: Record<string, string>;
@@ -28,6 +28,27 @@ const OWNED_ATTR = "data-paste-fixer-owned";
 const MENU_INTERACTION_ATTR = "data-paste-fixer-interaction";
 /** 末班车窗口：事件通路晚于此时仍未处理，直接注入当前可见菜单 */
 const FALLBACK_WINDOW_MS = 500;
+
+/** 选区是否覆盖渲染后的公式节点（决定是否提供“还原为纯文本”）。 */
+function rangeContainsMath(range: Range): boolean {
+    const container = document.createElement("div");
+    container.appendChild(range.cloneContents());
+    return !!container.querySelector('[data-type="inline-math"], [data-type="NodeMathBlock"]');
+}
+
+/**
+ * 菜单项按上下文显示：
+ * - 光标在公式内 → 只「还原为纯文本」；
+ * - 普通文字且无选择 → 不显示任何公式操作；
+ * - 有选区 → 「强制转换为公式」；选区覆盖公式节点时再加「还原为纯文本」。
+ */
+function menuActionsFor(ctx: ManualContext): {fix: boolean, revert: boolean} {
+    if (ctx.range.collapsed) {
+        return collapsedAtMath(ctx.range) ? {fix: false, revert: true} : {fix: false, revert: false};
+    }
+    const hasMath = rangeContainsMath(ctx.range);
+    return {fix: true, revert: hasMath};
+}
 
 export interface MenuHandlers {
     onOpenMenuContent: (event: CustomEvent<{menu: {addItem: (opt: unknown) => void}, range: Range}>) => void;
@@ -79,10 +100,14 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
         return ctx;
     };
 
-    /** DOM 注入两项（含分隔线；同一次 interaction 去重，先清同类旧节点）。 */
+    /** 按上下文项（fix/revert）注入按钮（含分隔线；同一次 interaction 去重，先清旧节点）。 */
     const injectIntoMenu = (ctx: ManualContext, root: HTMLElement): void => {
         if (root.querySelector(`[${MENU_INTERACTION_ATTR}="${ctx.interactionId}"]`)) {
             return;
+        }
+        const acts = menuActionsFor(ctx);
+        if (!acts.fix && !acts.revert) {
+            return; // 普通文字且无选择：不显示公式操作
         }
         // 同一菜单复用：先移除上一次注入的按钮与分隔线，避免残留/重复
         cleanOwned(root);
@@ -110,11 +135,26 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
         sep.className = "b3-menu__separator";
         sep.setAttribute(OWNED_ATTR, "1");
         container.appendChild(sep);
-        container.appendChild(mk(deps.i18n.menuConvert, "fix"));
-        container.appendChild(mk(deps.i18n.menuRevert, "revert"));
+        if (acts.fix) {
+            container.appendChild(mk(deps.i18n.menuConvert, "fix"));
+        }
+        if (acts.revert) {
+            container.appendChild(mk(deps.i18n.menuRevert, "revert"));
+        }
     };
 
-    // 一级：官方事件通路（无条件加项），并接管取消其它注入路径
+    /** 按上下文向菜单对象添加操作项（官方 addItem API 通路）。 */
+    const addContextualItems = (menu: {addItem: (opt: unknown) => void}, ctx: ManualContext): void => {
+        const acts = menuActionsFor(ctx);
+        if (acts.fix) {
+            menu.addItem(singleItem(deps.i18n.menuConvert, "fix", ctx));
+        }
+        if (acts.revert) {
+            menu.addItem(singleItem(deps.i18n.menuRevert, "revert", ctx));
+        }
+    };
+
+    // 一级：官方事件通路（按上下文加项），并接管取消其它注入路径
     const onOpenMenuContent = (event: CustomEvent<{menu: {addItem: (opt: unknown) => void}, range: Range}>) => {
         try {
             const { menu, range: menuRange } = event.detail || {};
@@ -123,8 +163,7 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
             }
             cancelFallback();
             const ctx = captureContext(menuRange, (event.detail as {protyle?: unknown}).protyle);
-            menu.addItem(singleItem(deps.i18n.menuConvert, "fix", ctx));
-            menu.addItem(singleItem(deps.i18n.menuRevert, "revert", ctx));
+            addContextualItems(menu, ctx);
         } catch (e) {
             console.error("[paste-fixer] 菜单注册失败", e);
         }
@@ -139,8 +178,7 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
             const detail = event.detail as {menu?: {addItem?: (opt: unknown) => void, element?: HTMLElement}};
             // 菜单对象带官方 addItem API 时优先 API（与一级通路一致）
             if (detail?.menu && typeof detail.menu.addItem === "function") {
-                detail.menu.addItem(singleItem(deps.i18n.menuConvert, "fix", activeContext));
-                detail.menu.addItem(singleItem(deps.i18n.menuRevert, "revert", activeContext));
+                addContextualItems(detail.menu as {addItem: (opt: unknown) => void}, activeContext);
             } else {
                 const root = detail?.menu?.element ??
                     Array.from(document.querySelectorAll(".b3-menu")).pop() as HTMLElement | undefined;

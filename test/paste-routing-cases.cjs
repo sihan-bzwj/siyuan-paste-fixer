@@ -36,7 +36,7 @@ async function main() {
         bundle: true, format: "cjs", platform: "node",
         outfile: path.join(__dirname, "_paste-context.cjs"), logLevel: "silent",
     });
-    const { tokenizeInlineMath } = require("./_fix-latex.cjs");
+    const { tokenizeInlineMath, tokenizeMath } = require("./_fix-latex.cjs");
     const { detectPasteScenario, countMathFormulas, planPasteHandling } = require("./_scenario.cjs");
     const { capturePasteContext, consumePasteContext, PASTE_CONTEXT_WINDOW_MS } = require("./_paste-context.cjs");
     const R = String.raw;
@@ -127,7 +127,21 @@ async function main() {
         assert(t5.length === 1 && t5[0].text === String.raw`\$5 转义美元`, "转义美元按文本保留");
     }
 
-    console.log("== 6. countMathFormulas：金额不再误计数 ==");
+    console.log("== 6. tokenizeMath 三态（text/inline/block）与跨行 ==");
+    {
+        const t1 = tokenizeMath("A $x$ B $$y$$ C");
+        assert(JSON.stringify(t1.map((t) => [t.kind, t.text])) ===
+            JSON.stringify([["text", "A "], ["inline", "x"], ["text", " B "], ["block", "y"], ["text", " C"]]),
+        "三态切分（inline/block 分开）", JSON.stringify(t1));
+        const t2 = tokenizeMath("$x\ny$", {multiline: true});
+        assert(t2.length === 1 && t2[0].kind === "text", "跨行纯变量对不可靠，保持文本", JSON.stringify(t2));
+        const t3 = tokenizeMath("$x+y\nz+w$", {multiline: true});
+        assert(t3.length === 1 && t3[0].kind === "inline" && t3[0].text === "x+y\nz+w", "跨行可靠对为 inline token", JSON.stringify(t3));
+        const t4 = tokenizeMath("价格 $5\n第二天花了 $10", {multiline: true});
+        assert(t4.length === 1 && t4[0].kind === "text", "金额跨行保持文本", JSON.stringify(t4));
+    }
+
+    console.log("== 7. countMathFormulas：金额不再误计数 ==");
     {
         assert(countMathFormulas("价格从 $5 涨到了 $10") === 0, "两处金额不计数", String(countMathFormulas("价格从 $5 涨到了 $10")));
         assert(countMathFormulas("$5 and $10 与 $x_i$") === 1, "混合金额+公式只计 1", String(countMathFormulas("$5 and $10 与 $x_i$")));
