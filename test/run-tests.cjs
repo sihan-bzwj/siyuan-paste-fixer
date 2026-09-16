@@ -323,7 +323,7 @@ async function main() {
     assert(katexErrors3 === 0, `全部 ${blocks3.length} 块 + ${inlines3.length} 行内公式 KaTeX 可解析`);
     fs.writeFileSync(path.join(__dirname, "fixtures/ghost3-fixed.txt"), fixed3);
 
-    console.log("== 6. 箭头命令白名单断词（separateCommandFromEnglishWord） ==");
+    console.log("== 6. 命令名后空格的统一断词（separateCommandFromLetters） ==");
     let arrowOut = fixLatexText("\\boxed{Vertex\\rightarrowEdge\\rightarrowDegree}");
     assert(arrowOut === "\\boxed{Vertex\\rightarrow Edge\\rightarrow Degree}", "图论 boxed 公式断词（用户样本）", JSON.stringify(arrowOut));
     arrowOut = fixLatexText("\\boxed{Walk\\rightarrowPath\\rightarrowConnectivity}");
@@ -345,6 +345,44 @@ async function main() {
         assert(true, "断词后的 boxed 公式 KaTeX 可解析");
     } catch (e) {
         assert(false, "断词后的 boxed 公式 KaTeX 可解析", e.message);
+    }
+
+    // 通用断词（v0.2.7）：命令名后紧跟字母 = 空格被吞。样本取自真实文档
+    // 20260418183837-v7jqnft（粘贴前 5 条 KaTeX 报 Undefined control sequence）
+    const splitCases = [
+        ["$L(\\theta+\\Delta\\theta)\\approxL(\\theta)+\\nabla L(\\theta)^\\top\\Delta\\theta$",
+            "$L(\\theta+\\Delta\\theta)\\approx L(\\theta)+\\nabla L(\\theta)^\\top\\Delta\\theta$", "\\approxL → \\approx L"],
+        ["$\\boxed{\\text{样本效用}\\proptog_{\\text{proxy}}^\\top P_tg_z}$",
+            "$\\boxed{\\text{样本效用}\\propto g_{\\text{proxy}}^\\top P_tg_z}$", "\\proptog → \\propto g"],
+        ["$s(z)=\\langleP_tg_z,g_{\\text{proxy}}\\rangle$",
+            "$s(z)=\\langle P_tg_z,g_{\\text{proxy}}\\rangle$", "\\langleP → \\langle P"],
+        ["$p(z)\\proptoe^{s(z)/\\tau}$",
+            "$p(z)\\propto e^{s(z)/\\tau}$", "\\proptoe → \\propto e"],
+        ["$\\boxed{g\\rightarrowP_tg}$",
+            "$\\boxed{g\\rightarrow P_tg}$", "\\rightarrowP → \\rightarrow P"],
+        ["$\\sinx$", "$\\sin x$", "\\sinx → \\sin x"],
+        ["$\\mathbbR^d$", "$\\mathbb R^d$", "\\mathbbR → \\mathbb R"],
+    ];
+    for (const [input, want, label] of splitCases) {
+        const got = fixLatexText(input);
+        assert(got === want, "断词：" + label, JSON.stringify(got));
+        try {
+            katex.renderToString(got.replace(/^\$|\$$/g, ""), { throwOnError: true });
+            assert(true, "断词后 KaTeX 可解析：" + label);
+        } catch (e) {
+            assert(false, "断词后 KaTeX 可解析：" + label, e.message);
+        }
+    }
+    // 合法命令（含前缀歧义，如 big ⊂ bigcup）与命令表外的写法一律不动——
+    // 命令表少一个名字就会在这里炸，所以这条循环是 latex-commands.ts 的护栏
+    const keepCommands = ["\\bigcup A_i", "\\bigcap A_i", "\\bigoplus", "A\\leftrightarrow B", "\\Leftrightarrow",
+        "\\longleftrightarrow", "\\twoheadrightarrow", "\\xrightarrow{f}", "\\xleftarrow{f}", "\\rightarrowtail",
+        "\\top T", "\\propto x", "\\langle x\\rangle", "\\intertext{abc}", "\\introduction", "\\operatorname{argmax}",
+        "\\sin\\theta", "\\mathbb R^d", "\\sqrt{x+1}", "\\alpha\\beta"];
+    for (const keep of keepCommands) {
+        const src = "$" + keep + "$";
+        const got = fixLatexText(src);
+        assert(got === src, "合法/表外命令不拆：" + keep, JSON.stringify(got));
     }
 
     console.log("== 7. 跨行 $...$ 自动升级 $$...$$（统一扫描器） ==");

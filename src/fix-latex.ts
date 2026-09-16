@@ -15,6 +15,8 @@
  * （比如方括号块转出的 $$...$$ 不再被圆括号扫描二次处理）。
  */
 
+import {LATEX_COMMANDS} from "./latex-commands";
+
 const BLOCK_BRACKET_RE = /\\\[([\s\S]+?)\\\]/g; // \[ ... \]
 const INLINE_BRACKET_RE = /\\\(([\s\S]{0,500}?)\\\)/g; // \( ... \)（内容可含括号，如 \( f(x) \)；上限防未闭合时 O(n²)）
 const BLOCK_DOLLAR_RE = /\$\$([\s\S]+?)\$\$/g; // $$ ... $$
@@ -155,18 +157,32 @@ function normalizeMathUnicode(content: string): string {
 }
 
 /**
- * 箭头/关系命令后紧跟英文单词时补分隔（白名单 + 大写字母 lookahead）：
- * `\rightarrowEdge` → `\rightarrow Edge`（KaTeX 会把连续字母整段当命令名，
- * 报 Undefined control sequence: \rightarrowEdge）。
+ * 命令名后被吞掉空格时补分隔：KaTeX 会把连续字母整段当成一个命令名，报
+ * `Undefined control sequence`。例如 `\proptoe^{...}` → `\propto e^{...}`、
+ * `\langleP_t` → `\langle P_t`、`\rightarrowEdge` → `\rightarrow Edge`。
  *
- * 只匹配命令名后**紧跟大写字母**：`\rightarrow B`（已有空格）、`\rightarrowtail`、
- * `\top` 等合法命令/正确写法一律不动。
+ * 判据（宁可少补，不误拆）：
+ * 1. 整段是已知 KaTeX 命令 → 不动（`\bigcup`、`\leftrightarrow`、`\rightarrowtail`）；
+ * 2. 否则取最长的已知命令前缀补空格，且剩余部分要"像下一个 token"——
+ *    单个字符（`\proptoe`、`\sinx`）或大写开头（`\rightarrowEdge`）。
+ *    这样 `\intertext`、`\introduction`、`C:\Users\file` 这类表外写法
+ *    不会被误拆成 `\int ertext` / `\int roduction` / `\fi le`。
  */
-function separateCommandFromEnglishWord(s: string): string {
-    return s.replace(
-        /\\(rightarrow|leftarrow|Rightarrow|Leftarrow|longrightarrow|longleftarrow|Longrightarrow|Longleftarrow|mapsto|to)(?=[A-Z])/g,
-        "\\$1 ",
-    );
+function separateCommandFromLetters(s: string): string {
+    return s.replace(/\\([a-zA-Z]+)/g, (whole, name: string) => {
+        if (LATEX_COMMANDS.has(name)) {
+            return whole;
+        }
+        for (let end = name.length - 1; end >= 2; end--) {
+            const head = name.slice(0, end);
+            if (!LATEX_COMMANDS.has(head)) {
+                continue;
+            }
+            const rest = name.slice(end);
+            return rest.length === 1 || /^[A-Z]/.test(rest) ? `\\${head} ${rest}` : whole;
+        }
+        return whole;
+    });
 }
 
 /** 数学区域内修复 */
@@ -174,8 +190,8 @@ function fixInsideMath(content: string): string {
     let s = normalizeMathUnicode(content);
     // Markdown 转义还原（\\frac → \frac；\= \_ \^ \{ 等还原为原字符）
     s = deEscapeMath(s);
-    // 箭头命令后紧跟大写英文词：补分隔（\rightarrowEdge → \rightarrow Edge）
-    s = separateCommandFromEnglishWord(s);
+    // 命令名后紧跟字母（空格被吞）：补分隔（\proptoe → \propto e）
+    s = separateCommandFromLetters(s);
     // 下标记号被 Markdown 斜体吃掉：_*{x}、*{x}、_\*{x}、\*{x} → _{x}
     s = s.replace(/_?\\?\*\{/g, "_{");
     // 行尾单个反斜杠（Markdown 粘贴丢了一个反斜杠，应为矩阵换行 \\）
@@ -199,7 +215,7 @@ function looksLikeInlineTrimCore(core: string): boolean {
 
 /** 行内公式修复：还原 Markdown 转义；去掉两侧边界空格（$ x $ 思源不解析；但 $5 and $10 这种只右侧有空格的不动） */
 function fixInlineMath(content: string): string {
-    let s = separateCommandFromEnglishWord(deEscapeMath(normalizeMathUnicode(content)));
+    let s = separateCommandFromLetters(deEscapeMath(normalizeMathUnicode(content)));
     if (/^\s/.test(s) && /\s$/.test(s)) {
         const core = s.trim();
         // 只有"像数学"才收拢边界空格；否则（如"$ 5 和 $"这类金额）保持原样。
@@ -519,7 +535,7 @@ function luteSafeInline(content: string): string {
 
 /** 单段（无代码围栏）修复 */
 function fixTextSegment(seg: string): string {
-    let s = separateCommandFromEnglishWord(seg);
+    let s = separateCommandFromLetters(seg);
     const codec = createPlaceholderCodec(seg);
     const {hold, restore, contains} = codec;
     // 1. 先保护已有公式。这样不规范的 $x+\(y\)+z$ 不会被改成嵌套美元公式。

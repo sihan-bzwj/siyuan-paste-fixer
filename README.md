@@ -97,7 +97,7 @@ npm install && npm run build
 - `==========` 碎片行、公式片段间空行 → `=`（AI 渲染把等号画成了分割线）
 - `$ x $`（两侧空格）→ `$x$`（否则思源不解析）；**跨行 `$...$`（内容可靠、不跨空行）自动升级为 `$$...$$`**——金额、Shell 变量、纯数字堆叠、段落边界绝不跨行配对（统一 `$` 扫描器口径）
 - 数学区中的 NBSP 转普通空格，零宽字符移除；正文与 Unicode 数学符号逐字保留
-- 箭头/关系命令后紧跟大写英文词时补分隔（白名单：`\rightarrow`、`\to`、`\mapsto` 等；`\rightarrowEdge` → `\rightarrow Edge`，`\rightarrowtail`/`\top` 等合法命令不动），修复 AI 渲染吞掉空格导致的 KaTeX `Undefined control sequence`
+- 命令名后被吞掉的空格自动补回（KaTeX 会把连续字母当成一个命令名，报 `Undefined control sequence`）：`\proptoe^{...}` → `\propto e^{...}`、`\langleP_t` → `\langle P_t`、`\rightarrowEdge` → `\rightarrow Edge`。按完整 KaTeX 命令表（`src/latex-commands.ts`）判断，`\bigcup`/`\leftrightarrow`/`\rightarrowtail`/`\top` 等合法命令与 `\intertext` 这类表外写法一律不动
 - 任意长度反引号/波浪线围栏、行内代码、链接 URL、图片路径、自动链接内部一律不处理；链接可见文字中的显式公式仍可修复
 - 不完整环境、未闭合定界符和混合定界符不猜测补齐，优先保持原文结构
 
@@ -120,7 +120,7 @@ npm run check     # 发布门禁：typecheck → 版本一致 → 全量测试 �
 npm run release-check  # check + 打包 + 发布内容检查
 ```
 
-约 600 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.x 新模块：手动转换（强制转换/还原、局部全量片段、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、跨块拒绝、`<br>` 换行序列化、分屏编辑器推导）、右键菜单（上下文相关项、common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照含行内代码 caret、500ms 时效、文本指纹）、统一 `$` 扫描器（跨行 `$...$` 自动升级 `$$...$$`、金额/Shell/空行边界保护、场景入口同口径）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）、箭头命令白名单断词（`\rightarrowEdge` → `\rightarrow Edge`）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
+约 600 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.x 新模块：手动转换（强制转换/还原、局部全量片段、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、跨块拒绝、`<br>` 换行序列化、分屏编辑器推导）、右键菜单（上下文相关项、common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照含行内代码 caret、500ms 时效、文本指纹）、统一 `$` 扫描器（跨行 `$...$` 自动升级 `$$...$$`、金额/Shell/空行边界保护、场景入口同口径）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）、命令名空格被吞的统一断词（`\proptoe` → `\propto e`、`\langleP_t` → `\langle P_t`、`\rightarrowEdge` → `\rightarrow Edge`，含 KaTeX 命令表覆盖护栏 `test/katex-commands.cjs`）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
 
 ## 项目结构
 
@@ -131,6 +131,7 @@ src/scenario.ts     场景分类器 + 粘贴路由裁决（纯函数）
 src/manual-action.ts  手动转换动作层（强制转换/还原、跨块拒绝、白名单保护）
 src/context-menu.ts 右键菜单（官方通路 + common-menu-open 事件兜底 + 超时注入）
 src/settings.ts     设置面板与持久化（校验 + 串行保存 + 失败检查）
+src/latex-commands.ts KaTeX 命令名表（断词规则用；test/katex-commands.cjs 做覆盖校验）
 src/siyuan-dom.ts    修复后 Markdown → 思源内部 DOM（保护段交 Lute、$$ 块手工生成）
 src/clipboard.ts     HTML/plain 剪贴板来源优先级（纯函数）
 src/fix-latex.ts     破损 LaTeX 修复逻辑 + 行内数学 tokenizer（纯函数，可无头测试）
