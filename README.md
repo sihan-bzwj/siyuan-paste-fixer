@@ -109,7 +109,7 @@ npm install && npm run build
 - 括号转换是保守的：`(a,b)`、`(T)`、`(i,j)` 这类无命令无下标的括号保持原文（无法与普通括号区分）；
 - 行内 `$` 解析依赖思源设置"行内公式"开启（默认开启）；
 - 完整单块含复杂格式（加粗/链接/行内代码及未来未知的语义节点）时，手动转换会拒绝执行并要求只选纯文本部分——白名单式保护，宁可少支持一个边界场景，也不能静默丢格式；
-- 粘贴内容为复杂富文本（链接/图片/表格/列表/标题/引用）时插件原样放行并提示，绝不为了公式丢结构；代码块/行内代码是插件硬边界（自动粘贴、右键菜单、命令面板一律不参与）；
+- 粘贴内容为复杂富文本（链接/图片/表格/列表/标题/引用）时插件原样放行并提示，绝不为了公式丢结构；放行后另有**「粘贴后兜底」**：等粘贴落地后，只对**渲染报错**（KaTeX parse error）的公式节点补一次内容修复（改 `data-content` 后走内核 `updateBlock`，保留 block ID、由内核重新渲染），范围只限本次粘贴新出现的块 + 光标所在块；块内有加粗/链接/行内代码等白名单外结构时整块跳过（fail-closed）；代码块/行内代码是插件硬边界（自动粘贴、右键菜单、命令面板一律不参与）；
 - 完整选中 Heading/CodeBlock 等非段落块时拒绝整块转换（防止 updateBlock 意外改变块类型）。
 
 ## 测试
@@ -120,7 +120,7 @@ npm run check     # 发布门禁：typecheck → 版本一致 → 全量测试 �
 npm run release-check  # check + 打包 + 发布内容检查
 ```
 
-约 600 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.x 新模块：手动转换（强制转换/还原、局部全量片段、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、跨块拒绝、`<br>` 换行序列化、分屏编辑器推导）、右键菜单（上下文相关项、common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照含行内代码 caret、500ms 时效、文本指纹）、统一 `$` 扫描器（跨行 `$...$` 自动升级 `$$...$$`、金额/Shell/空行边界保护、场景入口同口径）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）、命令名空格被吞的统一断词（`\proptoe` → `\propto e`、`\langleP_t` → `\langle P_t`、`\rightarrowEdge` → `\rightarrow Edge`，含 KaTeX 命令表覆盖护栏 `test/katex-commands.cjs`）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
+约 600 条断言覆盖 Ghost 论文笔记、中文/英文 Wikipedia 真实 MathML、对抗性 Markdown、剪贴板双来源、场景分类器边界（含代码里的 `\frac`、`80%` 弱特征、SCSS 变量行）、Lute 孤立美元配对保护、幂等性和 1 MB 压力输入，以及 v0.2.x 新模块：手动转换（强制转换/还原、局部全量片段、整块 prefix/suffix 判定、局部不 trim、白名单富格式保护、跨块拒绝、`<br>` 换行序列化、分屏编辑器推导）、右键菜单（上下文相关项、common-menu-open 事件化、菜单单例复用 10 次无残留）、设置（加载校验、串行落盘、失败检查）、粘贴路由（代码块目标快照含行内代码 caret、500ms 时效、文本指纹）、统一 `$` 扫描器（跨行 `$...$` 自动升级 `$$...$$`、金额/Shell/空行边界保护、场景入口同口径）、siyuan-dom（code fence 越界保护、公式属性转义、链接结构完整性）、命令名空格被吞的统一断词（`\proptoe` → `\propto e`、`\langleP_t` → `\langle P_t`、`\rightarrowEdge` → `\rightarrow Edge`，含 KaTeX 命令表覆盖护栏 `test/katex-commands.cjs`）、粘贴后兜底修复（只认渲染失败节点、修不好不动、行内不升级块级、白名单外结构整块跳过并回滚、范围只限新块/光标块）；新增公式均用 KaTeX 校验可解析。GitHub Actions 在每次 push/PR 自动跑 `npm run check`。
 
 ## 项目结构
 
@@ -132,6 +132,7 @@ src/manual-action.ts  手动转换动作层（强制转换/还原、跨块拒绝
 src/context-menu.ts 右键菜单（官方通路 + common-menu-open 事件兜底 + 超时注入）
 src/settings.ts     设置面板与持久化（校验 + 串行保存 + 失败检查）
 src/latex-commands.ts KaTeX 命令名表（断词规则用；test/katex-commands.cjs 做覆盖校验）
+src/post-paste-repair.ts 粘贴后兜底：只修渲染失败的公式节点（新块/光标块，fail-closed）
 src/siyuan-dom.ts    修复后 Markdown → 思源内部 DOM（保护段交 Lute、$$ 块手工生成）
 src/clipboard.ts     HTML/plain 剪贴板来源优先级（纯函数）
 src/fix-latex.ts     破损 LaTeX 修复逻辑 + 行内数学 tokenizer（纯函数，可无头测试）

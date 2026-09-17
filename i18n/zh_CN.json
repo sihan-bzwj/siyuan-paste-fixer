@@ -38,5 +38,6 @@
   "blockRichRefuse": "当前块包含复杂格式（加粗/链接/行内代码等），请只选择需要处理的纯文本部分",
   "blockTypeRefuse": "该块类型不支持整块转换（保护块类型不变）",
   "inCodeRange": "代码区域内不参与公式转换",
-  "hintRichPreserved": "检测到复杂富文本（链接/图片/表格等），为避免丢失格式已原样粘贴；可选中公式后右键「强制转换为公式」"
+  "hintRichPreserved": "检测到复杂富文本（链接/图片/表格等），为避免丢失格式已原样粘贴；可选中公式后右键「强制转换为公式」",
+  "hintPasteRepair": "已修复 {n} 个渲染报错的公式（粘贴内容里原本会显示 KaTeX parse error）"
 }

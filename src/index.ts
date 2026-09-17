@@ -20,6 +20,10 @@ import {createMenuHandlers, MenuHandlers} from "./context-menu";
 import {createSettingsPanel, loadSettingsFromFile, PasteFixerSettings, saveSettingsToFile} from "./settings";
 import {capturePasteContext, codeTargetFromProtyle, PasteContextSnapshot, resolvePasteContext} from "./paste-context";
 import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
+import {applyMathRepairs, collectMathRepairs, collectPasteTargetBlocks} from "./post-paste-repair";
+
+/** 兜底修复的重试时间表（ms）：等思源把粘贴内容和公式渲染落地，命中即停。 */
+const POST_PASTE_REPAIR_DELAYS = [0, 200, 500, 1000, 2000];
 
 type PasteDetail = IEventBusMap["paste"];
 
@@ -166,10 +170,75 @@ export default class PasteFixer extends Plugin {
             const snapshot = capturePasteContext(event);
             if (snapshot) {
                 this.pasteSnapshot = snapshot;
+                this.schedulePostPasteRepair(snapshot);
             }
         } catch (e) {
             /* 快照失败不影响粘贴 */
         }
+    };
+
+    /** 粘贴前该编辑器的块 id 快照（兜底修复的范围依据；null = 没抓到，只认光标块） */
+    private prePasteBlocks: {editor: HTMLElement, ids: Set<string>} | null = null;
+
+    /** 兜底修复是否有在跑的定时任务（同一时刻只留一条链） */
+    private repairScheduled = false;
+
+    /**
+     * 粘贴后兜底：富文本粘贴走"原样放行"分支时，破损公式仍会留在文档里渲染报错。
+     * 这里异步补一次"只修公式内容"的兜底（详见 post-paste-repair.ts）：
+     * 代码块/附件粘贴不介入，范围只限本次新块 + 光标块。
+     */
+    private schedulePostPasteRepair(snapshot: PasteContextSnapshot): void {
+        const editor = snapshot.protyleElement;
+        if (!editor) {
+            return;
+        }
+        this.prePasteBlocks = {
+            editor,
+            ids: new Set(
+                Array.from(editor.querySelectorAll("[data-node-id]"))
+                    .map((el) => el.getAttribute("data-node-id") || "")
+                    .filter(Boolean),
+            ),
+        };
+        if (snapshot.inCodeTarget || snapshot.hasFiles || this.repairScheduled) {
+            return;
+        }
+        this.repairScheduled = true;
+        window.setTimeout(() => void this.runPostPasteRepair(0), POST_PASTE_REPAIR_DELAYS[0]);
+    }
+
+    /** 等思源把粘贴内容与公式渲染落地（最多 3 轮），只动渲染失败的公式节点。 */
+    private runPostPasteRepair = async (attempt: number): Promise<void> => {
+        const retry = (): void => {
+            if (attempt + 1 < POST_PASTE_REPAIR_DELAYS.length) {
+                window.setTimeout(() => void this.runPostPasteRepair(attempt + 1), POST_PASTE_REPAIR_DELAYS[attempt + 1]);
+            } else {
+                this.repairScheduled = false;
+            }
+        };
+        const snap = this.prePasteBlocks;
+        if (!snap || !snap.editor.isConnected) {
+            this.repairScheduled = false;
+            return;
+        }
+        try {
+            const candidates = collectMathRepairs(
+                collectPasteTargetBlocks(snap.editor, snap.ids),
+                fixLatexText,
+            );
+            if (candidates.length === 0) {
+                retry();
+                return;
+            }
+            const fixed = await applyMathRepairs(candidates);
+            if (fixed > 0) {
+                showMessage(this.i18n.hintPasteRepair.replace("{n}", String(fixed)), 4000);
+            }
+        } catch (e) {
+            console.error("[paste-fixer] 粘贴后兜底修复失败", e);
+        }
+        this.repairScheduled = false;
     };
 
     /** 场景 → 生效策略（设置可覆盖默认值） */
