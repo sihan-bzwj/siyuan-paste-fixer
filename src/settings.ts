@@ -18,12 +18,13 @@ export interface PasteFixerSettings {
     aiPolicy?: ScenarioPolicy;
     webPolicy?: ScenarioPolicy;
     mixedPolicy?: ScenarioPolicy;
+    undelimitedPolicy?: ScenarioPolicy;
     hintsEnabled?: boolean;
 }
 
 export const SETTINGS_PATH = "/data/storage/petal/paste-fixer/data.json";
 
-const POLICY_KEYS = ["codePolicy", "aiPolicy", "webPolicy", "mixedPolicy"] as const;
+const POLICY_KEYS = ["codePolicy", "aiPolicy", "webPolicy", "mixedPolicy", "undelimitedPolicy"] as const;
 const VALID_POLICIES: readonly ScenarioPolicy[] = ["smart", "fix", "pass"];
 
 /** 非法/缺失策略值统一回默认（undefined → 调用方用 DEFAULT_POLICY 兜底）。 */
@@ -173,6 +174,7 @@ export function createSettingsPanel(
     addSelect("aiPolicy", i18n.settingAITitle, i18n.settingAIDesc);
     addSelect("webPolicy", i18n.settingWebTitle, i18n.settingWebDesc);
     addSelect("mixedPolicy", i18n.settingMixedTitle, i18n.settingMixedDesc);
+    addSelect("undelimitedPolicy", i18n.settingUndelimitedTitle, i18n.settingUndelimitedDesc);
     setting.addItem({
         title: i18n.settingHints,
         description: i18n.settingHintsDesc,

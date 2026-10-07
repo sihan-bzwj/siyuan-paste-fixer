@@ -74,11 +74,12 @@ export function looksLikeCode(text: string): boolean {
 }
 
 export type PasteScenario =
-    | "siyuan-internal" // 思源内部复制（siyuanHTML 含公式节点）
+    | "siyuan-internal" // 思源内部复制（任意非空 siyuanHTML）
     | "code-target"     // 粘贴目标在代码块/行内代码内
     | "code-content"    // 内容判为代码/配置文本
     | "web-math"        // text/html 携带 MathML/KaTeX/MathJax
     | "ai-latex"        // plain 含强 LaTeX 定界符（\[ \( \begin $$ 等）
+    | "undelimited-latex" // 裸 LaTeX 命令密度高但无定界符（AI 纯文本复制，opt-in 转换）
     | "mixed"           // 有数学信号且与普通正文混合
     | "plain-prose";    // 无任何数学信号
 
@@ -99,6 +100,7 @@ export const DEFAULT_POLICY: Record<PasteScenario, ScenarioPolicy> = {
     "code-content": "smart", // 智能=原样+提示（代码不参与公式修复）
     "web-math": "smart",
     "ai-latex": "smart",
+    "undelimited-latex": "smart", // 智能=原样+提示（opt-in：设置改「始终修复」才自动包裹片段）
     "mixed": "smart",
     "plain-prose": "pass",
 };
@@ -120,15 +122,24 @@ export function detectPasteScenario(input: ScenarioInput): PasteScenario {
     }
     // 4. 代码/配置文本：只看非保护段（fenced code 不参与代码/数学竞争，
     //    外部有公式 + 内部有 JS 时只按外部正文判定）
-    if (looksLikeCode(nonProtectedText(textPlain))) {
+    const semanticText = nonProtectedText(textPlain);
+    if (looksLikeCode(semanticText)) {
         return "code-content";
+    }
+    // 4.5 未定界 LaTeX：无任何定界符（$$/\[/\(/单 $ 对/裸环境——不抢 ai-latex
+    //     与 mixed），但裸命令/上下标密度高（≥2 强 token）——AI 纯文本复制的
+    //     典型形态；默认 smart 原样+提示
+    const hasDelimiter = /\$\$|\\\[|\\\(|\\begin\{/.test(semanticText) ||
+        scanDollarMath(semanticText, {multiline: true}).length > 0;
+    if (!hasDelimiter && needsUndelimitedDetection(textPlain)) {
+        return "undelimited-latex";
     }
     // 5. 纯散文：无数学信号
     if (!looksLikeMath(textPlain)) {
         return "plain-prose";
     }
     // 6. 强 LaTeX 定界符（只看非保护段）→ AI 数学文本
-    if (STRONG_LATEX_RE.test(nonProtectedText(textPlain))) {
+    if (STRONG_LATEX_RE.test(semanticText)) {
         return "ai-latex";
     }
     // 7. 其余有数学信号的内容（弱信号与正文混合）
@@ -214,7 +225,7 @@ export function planPasteHandling(input: PastePlanInput): PastePlan {
         return {scenario, action: "pass", hint: false, richPreserved: false};
     }
     const policy = input.getPolicy(scenario);
-    if (policy === "pass" || (policy === "smart" && scenario === "code-content")) {
+    if (policy === "pass" || (policy === "smart" && (scenario === "code-content" || scenario === "undelimited-latex"))) {
         return {scenario, action: "pass", hint: true, richPreserved: false};
     }
     return {scenario, action: "fix", hint: false, richPreserved: hasComplexRichHTML(input.textHTML)};
@@ -251,5 +262,6 @@ export function decidePasteHandling(input: PasteHandlingInput): PasteHandling {
 }
 
 // 避免循环依赖：hasMathML 与 looksLikeMath 在各自模块导出
-import { looksLikeMath, nonProtectedText, splitMarkdownSegments, tokenizeMath } from "./fix-latex";
+import { looksLikeMath, nonProtectedText, scanDollarMath, splitMarkdownSegments, tokenizeMath } from "./fix-latex";
+import { needsUndelimitedDetection } from "./undelimited";
 import { hasMathML } from "./mathml";

@@ -20,6 +20,7 @@ import {createMenuHandlers, MenuHandlers} from "./context-menu";
 import {createSettingsPanel, loadSettingsFromFile, PasteFixerSettings, saveSettingsToFile} from "./settings";
 import {capturePasteContext, codeTargetFromProtyle, PasteContextSnapshot, resolvePasteContext} from "./paste-context";
 import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
+import {convertUndelimitedLatex} from "./undelimited";
 import {applyMathRepairs, collectMathRepairs, collectPasteTargetBlocks} from "./post-paste-repair";
 
 /** 兜底修复的重试时间表（ms）：等思源把粘贴内容和公式渲染落地，命中即停。 */
@@ -105,7 +106,14 @@ export default class PasteFixer extends Plugin {
             }
             const scenario = handling.plan.scenario;
 
-            const decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
+            let decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
+            if (scenario === "undelimited-latex" && !decision) {
+                // 未定界 LaTeX 且策略为 fix：行级片段包裹（opt-in）
+                const converted = convertUndelimitedLatex(textPlain);
+                if (converted !== textPlain) {
+                    decision = {markdown: converted, source: "plain", htmlQuality: "none", sourceKinds: []};
+                }
+            }
             const fixed = decision?.markdown ?? null;
             const plain = fixed ?? textPlain;
 
@@ -249,6 +257,7 @@ export default class PasteFixer extends Plugin {
             case "ai-latex": return s.aiPolicy || DEFAULT_POLICY["ai-latex"];
             case "web-math": return s.webPolicy || DEFAULT_POLICY["web-math"];
             case "mixed": return s.mixedPolicy || DEFAULT_POLICY["mixed"];
+            case "undelimited-latex": return s.undelimitedPolicy || DEFAULT_POLICY["undelimited-latex"];
             default: return DEFAULT_POLICY[scenario];
         }
     }
@@ -283,7 +292,7 @@ export default class PasteFixer extends Plugin {
             }
             const text = this.hintText(scenario, count);
             if (text) {
-                showMessage(text, scenario === "code-content" ? 6000 : 4000);
+                showMessage(text, scenario === "code-content" || scenario === "undelimited-latex" ? 6000 : 4000);
             }
         } catch (e) {
             /* 提示失败不影响粘贴 */
@@ -300,6 +309,8 @@ export default class PasteFixer extends Plugin {
                 return this.i18n.hintWeb.replace("{n}", String(count));
             case "mixed":
                 return this.i18n.hintMixed.replace("{n}", String(count));
+            case "undelimited-latex":
+                return this.i18n.hintUndelimited;
             default:
                 return "";
         }

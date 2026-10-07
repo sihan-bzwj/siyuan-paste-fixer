@@ -179,7 +179,7 @@ async function main() {
         assert(settings.hintsEnabled === false && saved.hintsEnabled === false, "关闭即时落盘");
     }
 
-    console.log("== 6. 设置面板注册（new Setting + 5 项） ==");
+    console.log("== 6. 设置面板注册（new Setting + 6 项） ==");
     {
         const settings = {};
         const panel = S.createSettingsPanel({
@@ -189,7 +189,7 @@ async function main() {
             settingMixedTitle: "混合内容策略", settingMixedDesc: "",
             settingHints: "场景提示", settingHintsDesc: "",
         }, settings, () => {});
-        assert(panel.items.length === 5, "五个设置项", String(panel.items.length));
+        assert(panel.items.length === 6, "六个设置项（四场景+未定界+提示）", String(panel.items.length));
         assert(typeof panel.opts.confirmCallback === "function", "confirmCallback 注册");
     }
 
