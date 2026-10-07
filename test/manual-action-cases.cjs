@@ -222,6 +222,40 @@ async function main() {
         document.body.innerHTML = "";
     }
 
+    console.log("== 4c. 强制转换：中文混裸命令按片段包裹（绝不整段 $$ 包装） ==");
+    {
+        // v0.2.9 现场缺陷回归：bullet 段（多行中文+裸命令）曾被整段 $$ 包装成废块
+        let updates = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updates.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor = mkEditor();
+        const blk = mkBlock(editor, "w1", "· \\lor 换成 \\land<br>· \\land 换成 \\lor<br>所得公式 A^* 称为 A 的对偶式。");
+        const range = document.createRange();
+        range.setStart(blk, 0);
+        range.setEnd(blk, blk.childNodes.length);
+        const ctx = M.captureManualContext(range, null);
+        const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
+        assert(key === "done", "中文混裸命令整块转换返回 done", key);
+        const out = updates[0] ? updates[0].data : "";
+        assert(!out.includes("$$"), "绝无整段 $$ 包装", out);
+        assert(out.includes("· $\\lor$ 换成 $\\land$"), "命令按片段包裹", out);
+        assert(out.includes("所得公式 $A^*$ 称为 A 的对偶式。"), "同块多行各自片段包裹", out);
+        document.body.innerHTML = "";
+
+        // 纯中文正文（无数学信号）：不像公式，不包装
+        const editor2 = mkEditor();
+        const blk2 = mkBlock(editor2, "w2", "这一节在考试中通常有两种考法，内容主要分为四大块。");
+        const range2 = document.createRange();
+        range2.setStart(blk2, 0);
+        range2.setEnd(blk2, blk2.childNodes.length);
+        const ctx2 = M.captureManualContext(range2, null);
+        const key2 = await M.runManualAction(ctx2, "fix", fixLatexText, convertToPlain);
+        assert(key2 === "looksNotMath" || key2 === "noChange", "纯中文正文不包装", key2);
+        document.body.innerHTML = "";
+    }
+
     console.log("== 5. 光标在已有公式：fix 不动作 / revert 还原 ==");
     {
         const editor = mkEditor();

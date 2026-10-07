@@ -27,6 +27,7 @@ import {
     tokenizeMath,
 } from "./fix-latex";
 import {CODE_TARGET_SELECTOR} from "./paste-context";
+import {convertUndelimitedLatex} from "./undelimited";
 import {elementOf} from "./siyuan-dom";
 
 export interface ManualContext {
@@ -397,6 +398,14 @@ function forceConvertMath(source: string, fixText: (md: string) => string): stri
     // 混合内容（修复后含可靠数学对）：保持修复结果（原文姿态，空格不丢）
     if (scanDollarMath(fixed, {multiline: true}).length > 0) {
         return fixed;
+    }
+    // 中文/全角混裸命令（AI 文本常态）：按片段包裹（"· \lor 换成 \land" →
+    // "· $\lor$ 换成 $\land$"），绝不把含中文的整段塞进 $..$/$$..$——KaTeX
+    // 渲染中文必炸且命令被整段吞掉（真实案例：对偶与范式总结的 bullet 段
+    // 被整段 $$ 包装成废块）。片段转不动（纯中文/未知命令）→ 不像公式，null。
+    if (CJK_FULLWIDTH_RE.test(fixed)) {
+        const fragmented = convertUndelimitedLatex(fixed);
+        return fragmented !== fixed ? fragmented : null;
     }
     // 包装分支：源码两侧空白由调用方决定保留（局部保留、整块 trim）
     const leading = fixed.slice(0, fixed.length - fixed.trimStart().length);
