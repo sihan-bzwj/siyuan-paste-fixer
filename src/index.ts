@@ -6,7 +6,7 @@ import {
     maskLuteUnsafeDollars,
     maskProtectedSegments,
 } from "./fix-latex";
-import {selectClipboardMarkdown} from "./clipboard";
+import {ClipboardDecision, selectClipboardMarkdown} from "./clipboard";
 import {
     countMathFormulas,
     DEFAULT_POLICY,
@@ -124,13 +124,17 @@ export default class PasteFixer extends Plugin {
             }
             const scenario = handling.plan.scenario;
 
-            let decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
-            if (scenario === "undelimited-latex" && !decision) {
-                // 未定界 LaTeX 智能策略（默认）：行级片段自动包裹 $..$
+            let decision: ClipboardDecision | null = null;
+            if (scenario === "undelimited-latex") {
+                // 未定界场景内容以 textPlain 为准（HTML 携带数学标记时早已判为
+                // web-math）——转换成功就直接采用，不让 HTML 来源裁决兜圈子
                 const converted = convertUndelimitedLatex(textPlain);
                 if (converted !== textPlain) {
                     decision = {markdown: converted, source: "plain", htmlQuality: "none", sourceKinds: []};
                 }
+            }
+            if (!decision) {
+                decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
             }
             const fixed = decision?.markdown ?? null;
             const plain = fixed ?? textPlain;

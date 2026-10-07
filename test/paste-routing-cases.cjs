@@ -37,7 +37,7 @@ async function main() {
         outfile: path.join(__dirname, "_paste-context.cjs"), logLevel: "silent",
     });
     const { tokenizeMath } = require("./_fix-latex.cjs");
-    const { detectPasteScenario, countMathFormulas, planPasteHandling } = require("./_scenario.cjs");
+    const { detectPasteScenario, countMathFormulas, planPasteHandling, decidePasteHandling, hasComplexRichHTML } = require("./_scenario.cjs");
     const { capturePasteContext, PASTE_CONTEXT_WINDOW_MS, resolvePasteContext } = require("./_paste-context.cjs");
     const R = String.raw;
 
@@ -211,6 +211,24 @@ async function main() {
         assert(uCons.action === "pass" && uCons.hint === true, "未定界 conservative → 放行+提示");
         const uOff = plan(bare, "", "", false, (s) => (s === "undelimited-latex" ? "off" : "smart"));
         assert(uOff.action === "pass" && uOff.hint === false, "未定界 off → 静默放行");
+        // v0.2.9 现场缺陷回归：AI 聊天 HTML（sup/strong/hr）曾触发复杂富文本保护
+        // 把未定界转换整体放行——该保护对未定界场景不适用（HTML 只是排版皮）
+        const supHtml = "<p><strong>定理：</strong>\\neg A(P_1) \\Leftrightarrow A<sup>*(\\neg P_1)</sup></p><hr><p>· \\lor 换成 \\land</p>";
+        assert(hasComplexRichHTML(supHtml) === true, "前置确认：该 HTML 含复杂结构");
+        const supPlan = plan(bare, supHtml);
+        assert(supPlan.scenario === "undelimited-latex" && supPlan.action === "fix" && supPlan.richPreserved === false,
+            "未定界 + 复杂 HTML → 仍进入修复管线（富文本保护豁免）", JSON.stringify(supPlan));
+        const supHandling = decidePasteHandling({
+            textPlain: bare, textHTML: supHtml, siyuanHTML: "", inCodeTarget: false, hasFiles: false,
+            getPolicy: () => "smart",
+        });
+        assert(supHandling.kind === "fix", "未定界 + 复杂 HTML 实际进入修复管线（不再 rich 放行）", JSON.stringify(supHandling));
+        // 数学场景的富文本保护必须保持不变（ai-latex 仍被 rich 放行）
+        const aiRich = decidePasteHandling({
+            textPlain: "$$x$$", textHTML: supHtml, siyuanHTML: "", inCodeTarget: false, hasFiles: false,
+            getPolicy: () => "smart",
+        });
+        assert(aiRich.kind === "passthrough" && aiRich.reason === "rich", "ai-latex 复杂富文本保护不变");
     }
 
     console.log("== 5. tokenizeMath 行内配对：正文/公式/金额边界 ==");

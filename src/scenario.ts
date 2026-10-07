@@ -239,8 +239,13 @@ export function planPasteHandling(input: PastePlanInput): PastePlan {
         // 保守/pass（旧值）= 原样粘贴 + 场景提示；code-content 智能（含旧值 fix）= 识别+提示
         return {scenario, action: "pass", hint: true, richPreserved: false};
     }
-    // smart（数学场景自动处理；旧值 fix 等同）→ 修复管线
-    return {scenario, action: "fix", hint: false, richPreserved: hasComplexRichHTML(input.textHTML)};
+    // smart（数学场景自动处理；旧值 fix 等同）→ 修复管线。
+    // 复杂富文本保护对未定界场景不适用：AI 聊天复制出的 HTML（p/strong/sup/hr
+    // 等）只是纯文本的排版皮，内容以 textPlain 为准；智能档的用户意图就是
+    // "把这些裸命令转成公式"，转换整体替换载荷时排版有意让位（真实案例：
+    // 对偶与范式总结，50 对公式被 sup 标签挡在门外）。
+    return {scenario, action: "fix", hint: false,
+        richPreserved: scenario !== "undelimited-latex" && hasComplexRichHTML(input.textHTML)};
 }
 
 export type PasteHandling =

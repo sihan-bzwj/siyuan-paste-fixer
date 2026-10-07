@@ -108,6 +108,30 @@ async function main() {
     }
     assert(fragErrors === 0, `夹具全部 ${allFrags.length} 个片段 KaTeX 可解析`, `${fragErrors} 个失败`);
 
+    console.log("== 3b. 夹具整篇（duel-normalform-sup，用户真实粘贴案例）==");
+    {
+        // 这篇带 <sup> 断裂标签与 --- 分隔线的真实 AI 输出，曾在带 HTML 通道被
+        // 复杂富文本保护整体放行（v0.2.9 现场缺陷）；纯文本通道必须正常转换
+        const supRaw = fs.readFileSync(path.join(__dirname, "fixtures/duel-normalform-sup.txt"), "utf-8");
+        assert(needsUndelimitedDetection(supRaw), "真实案例触发未定界检测");
+        assert(detectPasteScenario(ctx(supRaw)) === "undelimited-latex", "真实案例判为未定界场景");
+        const supOut = convertUndelimitedLatex(supRaw);
+        assert(supOut !== supRaw, "真实案例发生转换");
+        assert(supOut.includes("· $\\lor$ 换成 $\\land$"), "命令词行已转换");
+        assert(supOut.includes(R`$\neg P \land Q \land R$ 编码为 011`), "编码示例行已转换");
+        const supFrags = [...supOut.matchAll(/\$([^$\n]+)\$/g)].map((m) => m[1]);
+        let supErrors = 0;
+        for (const frag of supFrags) {
+            try {
+                katex.renderToString(frag.trim(), {throwOnError: true, displayMode: false});
+            } catch (e) {
+                supErrors++;
+            }
+        }
+        assert(supErrors === 0 && supFrags.length >= 40,
+            `真实案例 ${supFrags.length} 个片段全部 KaTeX 可解析`, `${supErrors} 个失败`);
+    }
+
     console.log("== 4. 保护段不动 ==");
     {
         const withFence = "```\n\\lor \\land \\neg\n```\n正文 \\lor 说明";
