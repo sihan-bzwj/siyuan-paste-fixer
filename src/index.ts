@@ -17,7 +17,7 @@ import {
 import {hasMathML} from "./mathml";
 import {captureManualContext, deriveProtyleElement, ManualContext, runManualAction} from "./manual-action";
 import {createMenuHandlers, MenuHandlers} from "./context-menu";
-import {createSettingsPanel, loadSettingsFromFile, PasteFixerSettings, saveSettingsToFile} from "./settings";
+import {createSettingsPanel, loadSettingsFromFile, PasteFixerSettings, policyOf, PolicyKey, saveSettingsToFile} from "./settings";
 import {capturePasteContext, codeTargetFromProtyle, PasteContextSnapshot, resolvePasteContext} from "./paste-context";
 import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
 import {convertUndelimitedLatex} from "./undelimited";
@@ -25,6 +25,15 @@ import {applyMathRepairs, collectMathRepairs, collectPasteTargetBlocks} from "./
 
 /** 兜底修复的重试时间表（ms）：等思源把粘贴内容和公式渲染落地，命中即停。 */
 const POST_PASTE_REPAIR_DELAYS = [0, 200, 500, 1000, 2000];
+
+/** 场景 → 策略设置键（提示一键切换共用；固定放行场景无策略键不参与切换）。 */
+const POLICY_KEY_OF_SCENARIO: Partial<Record<PasteScenario, PolicyKey>> = {
+    "code-content": "codePolicy",
+    "ai-latex": "aiPolicy",
+    "web-math": "webPolicy",
+    "mixed": "mixedPolicy",
+    "undelimited-latex": "undelimitedPolicy",
+};
 
 type PasteDetail = IEventBusMap["paste"];
 
@@ -108,7 +117,7 @@ export default class PasteFixer extends Plugin {
 
             let decision = selectClipboardMarkdown(textHTML, textPlain, siyuanHTML);
             if (scenario === "undelimited-latex" && !decision) {
-                // 未定界 LaTeX 且策略为 fix：行级片段包裹（opt-in）
+                // 未定界 LaTeX 智能策略（默认）：行级片段自动包裹 $..$
                 const converted = convertUndelimitedLatex(textPlain);
                 if (converted !== textPlain) {
                     decision = {markdown: converted, source: "plain", htmlQuality: "none", sourceKinds: []};
@@ -253,11 +262,11 @@ export default class PasteFixer extends Plugin {
     private scenarioPolicy(scenario: PasteScenario): ScenarioPolicy {
         const s = this.settings as unknown as Record<string, ScenarioPolicy>;
         switch (scenario) {
-            case "code-content": return s.codePolicy || DEFAULT_POLICY["code-content"];
-            case "ai-latex": return s.aiPolicy || DEFAULT_POLICY["ai-latex"];
-            case "web-math": return s.webPolicy || DEFAULT_POLICY["web-math"];
-            case "mixed": return s.mixedPolicy || DEFAULT_POLICY["mixed"];
-            case "undelimited-latex": return s.undelimitedPolicy || DEFAULT_POLICY["undelimited-latex"];
+            case "code-content": return policyOf(s, "codePolicy");
+            case "ai-latex": return policyOf(s, "aiPolicy");
+            case "web-math": return policyOf(s, "webPolicy");
+            case "mixed": return policyOf(s, "mixedPolicy");
+            case "undelimited-latex": return policyOf(s, "undelimitedPolicy");
             default: return DEFAULT_POLICY[scenario];
         }
     }
@@ -279,7 +288,7 @@ export default class PasteFixer extends Plugin {
         }
     }
 
-    /** 场景提示（设置可关闭；提示失败不影响粘贴） */
+    /** 场景提示（设置可关闭；提示失败不影响粘贴）。数学场景带「智能↔保守」一键切换按钮。 */
     private maybeHint(scenario: PasteScenario, count: number): void {
         try {
             const now = Date.now();
@@ -291,9 +300,26 @@ export default class PasteFixer extends Plugin {
                 return;
             }
             const text = this.hintText(scenario, count);
-            if (text) {
-                showMessage(text, scenario === "code-content" || scenario === "undelimited-latex" ? 6000 : 4000);
+            if (!text) {
+                return;
             }
+            const key = POLICY_KEY_OF_SCENARIO[scenario];
+            if (key && scenario !== "code-content") {
+                // 一键切换：智能 → 保守（成功处理提示）/ 保守 → 智能（仅提示文案）。
+                // 提示开关关闭时不会走到这里，切换入口随提示一起关闭。
+                const policy = this.scenarioPolicy(scenario);
+                if (policy === "smart") {
+                    this.notifyWithSwitch(text, this.i18n.hintSwitchConservative,
+                        () => this.applyPolicySwitch(key, "conservative"));
+                    return;
+                }
+                if (policy === "conservative") {
+                    this.notifyWithSwitch(text, this.i18n.hintSwitchSmart,
+                        () => this.applyPolicySwitch(key, "smart"));
+                    return;
+                }
+            }
+            showMessage(text, scenario === "code-content" ? 6000 : 4000);
         } catch (e) {
             /* 提示失败不影响粘贴 */
         }
@@ -304,15 +330,65 @@ export default class PasteFixer extends Plugin {
             case "code-content":
                 return this.i18n.hintCode;
             case "ai-latex":
-                return this.i18n.hintAI.replace("{n}", String(count));
+                return count > 0
+                    ? this.i18n.hintAI.replace("{n}", String(count))
+                    : this.i18n.hintAIPassive;
             case "web-math":
-                return this.i18n.hintWeb.replace("{n}", String(count));
+                return count > 0
+                    ? this.i18n.hintWeb.replace("{n}", String(count))
+                    : this.i18n.hintWebPassive;
             case "mixed":
-                return this.i18n.hintMixed.replace("{n}", String(count));
+                return count > 0
+                    ? this.i18n.hintMixed.replace("{n}", String(count))
+                    : this.i18n.hintMixedPassive;
             case "undelimited-latex":
-                return this.i18n.hintUndelimited;
+                return count > 0
+                    ? this.i18n.hintUndelimitedFixed.replace("{n}", String(count))
+                    : this.i18n.hintUndelimited;
             default:
                 return "";
+        }
+    }
+
+    /**
+     * 带一键切换按钮的场景提示：SDK showMessage 无回调参数（text/timeout/type/id），
+     * 但消息按 innerHTML 注入 snackbar——这里在消息里内嵌按钮，并对最新一条
+     * snackbar 项（afterbegin 插入）绑定点击。绑定失败只影响切换入口，不影响提示。
+     */
+    private notifyWithSwitch(text: string, actionLabel: string, onAction: () => void): void {
+        try {
+            showMessage(
+                text + `<button class="b3-button b3-button--text" data-pf-switch style="margin-left: 8px">${actionLabel}</button>`,
+                6000,
+            );
+            const container = document.getElementById("message")?.firstElementChild;
+            const item = container ? container.firstElementChild as HTMLElement | null : null;
+            const chip = item ? item.querySelector("[data-pf-switch]") as HTMLElement | null : null;
+            if (chip) {
+                chip.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    if (chip.hasAttribute("data-pf-done")) {
+                        return;
+                    }
+                    chip.setAttribute("data-pf-done", "1");
+                    chip.setAttribute("disabled", "disabled");
+                    onAction();
+                });
+            }
+        } catch (e) {
+            /* 提示失败不影响粘贴 */
+        }
+    }
+
+    /** 切换按钮回调：改策略、落盘并短提示确认（面板元素创建时动态读取，无需额外刷新）。 */
+    private applyPolicySwitch(key: PolicyKey, next: "smart" | "conservative"): void {
+        try {
+            (this.settings as Record<string, unknown>)[key] = next;
+            void saveSettingsToFile(this.settings);
+            this.lastHintAt = Date.now();
+            showMessage(next === "smart" ? this.i18n.hintSwitchedSmart : this.i18n.hintSwitchedConservative, 4000);
+        } catch (e) {
+            /* 切换失败不影响粘贴 */
         }
     }
 
@@ -327,16 +403,14 @@ export default class PasteFixer extends Plugin {
             }
             const rect = btn ? btn.getBoundingClientRect() : null;
             const menu = new Menu("paste-fixer-quick", () => {});
-            // 代码内容：smart（默认不修）↔ fix（强制修）
-            // AI/网页/混合：smart（默认自动处理）↔ pass（关闭自动处理）
+            // 三档口径：智能（自动处理）↔ 保守（仅提示）；代码内容 智能（识别+提示）↔ 关闭（静默）
             const toggle = (
-                key: "codePolicy" | "aiPolicy" | "webPolicy" | "mixedPolicy",
+                key: PolicyKey,
                 scenario: PasteScenario,
                 label: string,
-                toggledValue: "fix" | "pass",
+                toggledValue: "conservative" | "off",
             ): void => {
-                const current = this.scenarioPolicy(scenario);
-                const on = current === toggledValue;
+                const on = this.scenarioPolicy(scenario) === "smart";
                 menu.addItem({
                     icon: on ? "iconSelect" : "iconClose",
                     label,
@@ -347,10 +421,11 @@ export default class PasteFixer extends Plugin {
                     },
                 });
             };
-            toggle("codePolicy", "code-content", this.i18n.quickCode, "fix");
-            toggle("aiPolicy", "ai-latex", this.i18n.quickAI, "pass");
-            toggle("webPolicy", "web-math", this.i18n.quickWeb, "pass");
-            toggle("mixedPolicy", "mixed", this.i18n.quickMixed, "pass");
+            toggle("codePolicy", "code-content", this.i18n.quickCode, "off");
+            toggle("aiPolicy", "ai-latex", this.i18n.quickAI, "conservative");
+            toggle("webPolicy", "web-math", this.i18n.quickWeb, "conservative");
+            toggle("mixedPolicy", "mixed", this.i18n.quickMixed, "conservative");
+            toggle("undelimitedPolicy", "undelimited-latex", this.i18n.quickUndelimited, "conservative");
             const hintsOn = this.settings.hintsEnabled !== false;
             menu.addItem({
                 icon: hintsOn ? "iconSelect" : "iconClose",

@@ -5,7 +5,7 @@
  * 与 text-process 一致地用官方 `new Setting(...)` 自建实例并向插件开放保存回调。
  *
  * 持久化约定：
- * - 加载时校验策略值（smart/fix/pass），非法值回默认；
+ * - 加载时校验策略值（smart/conservative/off；旧值 fix/pass 兼容映射），非法值回默认；
  * - 保存走串行队列，多次快速点击顶栏时按调用顺序落盘，最后一次操作永远最后生效；
  * - 面板元素创建时动态读取当前设置，顶栏先改策略再开面板不会显示旧值。
  */
@@ -25,11 +25,31 @@ export interface PasteFixerSettings {
 export const SETTINGS_PATH = "/data/storage/petal/paste-fixer/data.json";
 
 const POLICY_KEYS = ["codePolicy", "aiPolicy", "webPolicy", "mixedPolicy", "undelimitedPolicy"] as const;
-const VALID_POLICIES: readonly ScenarioPolicy[] = ["smart", "fix", "pass"];
+export type PolicyKey = (typeof POLICY_KEYS)[number];
+
+/** 新三档：智能 / 保守（仅提示）/ 关闭。代码内容没有"修复"可保守，只留智能（识别+提示）与关闭。 */
+const SMART_CONSERVATIVE_OFF: readonly ScenarioPolicy[] = ["smart", "conservative", "off"];
+const SMART_OFF: readonly ScenarioPolicy[] = ["smart", "off"];
+
+function allowedPolicies(key: PolicyKey): readonly ScenarioPolicy[] {
+    return key === "codePolicy" ? SMART_OFF : SMART_CONSERVATIVE_OFF;
+}
 
 /** 非法/缺失策略值统一回默认（undefined → 调用方用 DEFAULT_POLICY 兜底）。 */
-function normalizePolicy(value: unknown): ScenarioPolicy | undefined {
-    return VALID_POLICIES.includes(value as ScenarioPolicy) ? value as ScenarioPolicy : undefined;
+function normalizePolicy(value: unknown, key: PolicyKey): ScenarioPolicy | undefined {
+    const v = value as ScenarioPolicy;
+    if (allowedPolicies(key).includes(v)) {
+        return v;
+    }
+    // 旧值/越档值兼容：fix 等同 smart，pass/conservative 等同保守；
+    // code 无保守档，一律回 smart（识别+提示）
+    if (v === "fix") {
+        return "smart";
+    }
+    if (v === "pass" || v === "conservative") {
+        return key === "codePolicy" ? "smart" : "conservative";
+    }
+    return undefined;
 }
 
 /** 从 petal 文件加载设置；任何失败/非法值都用空对象（默认策略兜底）。 */
@@ -50,7 +70,7 @@ export async function loadSettingsFromFile(): Promise<PasteFixerSettings> {
         const raw = JSON.parse(txt) as Record<string, unknown>;
         const out: PasteFixerSettings = {};
         for (const key of POLICY_KEYS) {
-            const v = normalizePolicy(raw[key]);
+            const v = normalizePolicy(raw[key], key);
             if (v) {
                 out[key] = v;
             }
@@ -94,31 +114,32 @@ export function saveSettingsToFile(settings: PasteFixerSettings): Promise<void> 
     return saveChain;
 }
 
-/** 场景策略下拉选项（设置面板与顶栏开关共用文案来源）。 */
-export function policyOptions(i18n: Record<string, string>): Array<{text: string, value: string}> {
-    return [
-        {text: i18n.settingSmart, value: "smart"},
-        {text: i18n.settingFix, value: "fix"},
-        {text: i18n.settingPass, value: "pass"},
-    ];
+/** 场景策略下拉选项（按场景分档：code 两档，其余三档；设置面板与顶栏开关共用文案来源）。 */
+export function policyOptions(i18n: Record<string, string>, key: PolicyKey): Array<{text: string, value: string}> {
+    return allowedPolicies(key).map((value) => ({
+        value,
+        text: value === "smart" ? i18n.settingSmart
+            : value === "conservative" ? i18n.settingConservative
+            : i18n.settingOff,
+    }));
 }
 
-/** 当前生效策略（含默认值兜底）。 */
-export function policyOf(settings: PasteFixerSettings, key: (typeof POLICY_KEYS)[number]): ScenarioPolicy {
-    return normalizePolicy(settings[key]) ?? "smart";
+/** 当前生效策略（含默认值兜底与旧值映射）。 */
+export function policyOf(settings: PasteFixerSettings, key: PolicyKey): ScenarioPolicy {
+    return normalizePolicy(settings[key], key) ?? "smart";
 }
 
 /** 策略下拉元素：创建时动态读取当前设置，变更即时落盘。 */
 export function buildPolicySelect(
     i18n: Record<string, string>,
-    key: (typeof POLICY_KEYS)[number],
+    key: PolicyKey,
     settings: PasteFixerSettings,
     save: (settings: PasteFixerSettings) => void,
 ): HTMLElement {
     const select = document.createElement("select");
     select.className = "b3-select";
     const current = policyOf(settings, key);
-    for (const opt of policyOptions(i18n)) {
+    for (const opt of policyOptions(i18n, key)) {
         const o = document.createElement("option");
         o.value = opt.value;
         o.textContent = opt.text;
@@ -126,7 +147,7 @@ export function buildPolicySelect(
         select.appendChild(o);
     }
     select.addEventListener("change", () => {
-        settings[key] = normalizePolicy(select.value) ?? "smart";
+        settings[key] = normalizePolicy(select.value, key) ?? "smart";
         save(settings);
     });
     return select;

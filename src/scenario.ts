@@ -91,16 +91,21 @@ export interface ScenarioInput {
     inCodeTarget: boolean;
 }
 
-export type ScenarioPolicy = "smart" | "fix" | "pass";
+/**
+ * 场景策略三档：smart=智能（自动处理）、conservative=保守（仅提示不改写）、
+ * off=关闭（静默放行）。fix/pass 是 v0.2.8 及更早已落盘的旧值
+ * （行为分别等同 smart/conservative），仅作兼容保留。
+ */
+export type ScenarioPolicy = "smart" | "conservative" | "off" | "fix" | "pass";
 
-/** 场景 → 默认策略。smart=智能（见 index.ts 路由）；fix=强制修复；pass=原样。 */
+/** 场景 → 默认策略。smart=智能（见 planPasteHandling 路由）；固定放行场景该字段不参与路由。 */
 export const DEFAULT_POLICY: Record<PasteScenario, ScenarioPolicy> = {
     "siyuan-internal": "pass",
     "code-target": "pass",
-    "code-content": "smart", // 智能=原样+提示（代码不参与公式修复）
+    "code-content": "smart", // 智能=识别+提示（代码不参与公式修复）；关闭=静默（代码无保守档）
     "web-math": "smart",
     "ai-latex": "smart",
-    "undelimited-latex": "smart", // 智能=原样+提示（opt-in：设置改「始终修复」才自动包裹片段）
+    "undelimited-latex": "smart", // 智能=自动为片段包裹 $..$；保守=仅提示；关闭=静默
     "mixed": "smart",
     "plain-prose": "pass",
 };
@@ -128,7 +133,7 @@ export function detectPasteScenario(input: ScenarioInput): PasteScenario {
     }
     // 4.5 未定界 LaTeX：无任何定界符（$$/\[/\(/单 $ 对/裸环境——不抢 ai-latex
     //     与 mixed），但裸命令/上下标密度高（≥2 强 token）——AI 纯文本复制的
-    //     典型形态；默认 smart 原样+提示
+    //     典型形态；默认 smart 自动包裹片段（保守=仅提示，关闭=静默）
     const hasDelimiter = /\$\$|\\\[|\\\(|\\begin\{/.test(semanticText) ||
         scanDollarMath(semanticText, {multiline: true}).length > 0;
     if (!hasDelimiter && needsUndelimitedDetection(textPlain)) {
@@ -211,8 +216,8 @@ export interface PastePlan {
  * 粘贴路由的唯一决策入口（EventBus paste 事件调用）。
  *
  * 固定放行场景（siyuan-internal / code-target / plain-prose）直接原样；
- * code-content 智能策略与所有 pass 策略原样 + 提示；其余进入修复管线，
- * 但复杂富文本（无法无损重写）在修复管线内整体放行。
+ * off 静默放行；conservative/pass（旧值）与 code-content 智能策略原样 + 提示；
+ * 其余进入修复管线，但复杂富文本（无法无损重写）在修复管线内整体放行。
  */
 export function planPasteHandling(input: PastePlanInput): PastePlan {
     const scenario = detectPasteScenario({
@@ -225,9 +230,16 @@ export function planPasteHandling(input: PastePlanInput): PastePlan {
         return {scenario, action: "pass", hint: false, richPreserved: false};
     }
     const policy = input.getPolicy(scenario);
-    if (policy === "pass" || (policy === "smart" && (scenario === "code-content" || scenario === "undelimited-latex"))) {
+    if (policy === "off") {
+        // 关闭：场景整体不处理（无提示，切换入口也随之消失）
+        return {scenario, action: "pass", hint: false, richPreserved: false};
+    }
+    if (policy === "pass" || policy === "conservative" ||
+        ((policy === "smart" || policy === "fix") && scenario === "code-content")) {
+        // 保守/pass（旧值）= 原样粘贴 + 场景提示；code-content 智能（含旧值 fix）= 识别+提示
         return {scenario, action: "pass", hint: true, richPreserved: false};
     }
+    // smart（数学场景自动处理；旧值 fix 等同）→ 修复管线
     return {scenario, action: "fix", hint: false, richPreserved: hasComplexRichHTML(input.textHTML)};
 }
 

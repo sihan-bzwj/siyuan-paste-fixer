@@ -44,12 +44,12 @@ async function main() {
 
     const i18n = {
         settingSmart: "智能（推荐）",
-        settingFix: "始终修复公式",
-        settingPass: "始终原样粘贴",
+        settingConservative: "保守（仅提示）",
+        settingOff: "关闭",
     };
     const tick = () => new Promise((r) => setTimeout(r, 20));
 
-    console.log("== 1. 加载校验：非法策略值回默认 ==");
+    console.log("== 1. 加载校验：非法策略值回默认，旧值 fix/pass 兼容映射 ==");
     {
         global.fetch = async (url) => {
             if (String(url).includes("getFile")) {
@@ -57,7 +57,7 @@ async function main() {
                     codePolicy: "evil",
                     aiPolicy: "fix",
                     webPolicy: 12,
-                    mixedPolicy: "smart",
+                    mixedPolicy: "pass",
                     hintsEnabled: "no",
                 })};
             }
@@ -65,10 +65,28 @@ async function main() {
         };
         const s = await S.loadSettingsFromFile();
         assert(s.codePolicy === undefined, "非法 codePolicy 回默认");
-        assert(s.aiPolicy === "fix", "合法 aiPolicy 保留", s.aiPolicy);
+        assert(s.aiPolicy === "smart", "旧值 fix 映射为 smart", s.aiPolicy);
         assert(s.webPolicy === undefined, "非字符串 webPolicy 回默认");
-        assert(s.mixedPolicy === "smart", "合法 mixedPolicy 保留");
+        assert(s.mixedPolicy === "conservative", "旧值 pass 映射为 conservative", s.mixedPolicy);
         assert(s.hintsEnabled === undefined, "非布尔 hintsEnabled 回默认");
+    }
+
+    console.log("== 1.5 新三档与 code 两档校验 ==");
+    {
+        global.fetch = async (url) => {
+            if (String(url).includes("getFile")) {
+                return {ok: true, text: async () => JSON.stringify({
+                    codePolicy: "conservative",
+                    aiPolicy: "conservative",
+                    mixedPolicy: "off",
+                })};
+            }
+            return {ok: true, text: async () => ""};
+        };
+        const s = await S.loadSettingsFromFile();
+        assert(s.codePolicy === "smart", "code 无保守档：conservative 回 smart（识别+提示）", s.codePolicy);
+        assert(s.aiPolicy === "conservative", "AI 场景合法 conservative 保留", s.aiPolicy);
+        assert(s.mixedPolicy === "off", "合法 off 保留", s.mixedPolicy);
     }
 
     console.log("== 2. 加载容错：坏 JSON / 空文件 ==");
@@ -151,21 +169,30 @@ async function main() {
         console.warn = origWarn;
     }
 
-    console.log("== 4. 策略下拉：创建时动态读取当前设置 ==");
+    console.log("== 4. 策略下拉：创建时动态读取当前设置（按场景分档） ==");
     {
+        // code 两档（智能/关闭），其余三档（智能/保守/关闭）
+        assert(S.policyOptions(i18n, "codePolicy").length === 2, "code 下拉两档");
+        assert(S.policyOptions(i18n, "aiPolicy").length === 3, "AI 下拉三档");
+        assert(S.policyOptions(i18n, "undelimitedPolicy").map((o) => o.value).join(",") === "smart,conservative,off",
+            "未定界三档顺序", JSON.stringify(S.policyOptions(i18n, "undelimitedPolicy")));
         let saved = null;
-        const settings = {codePolicy: "pass"};
+        const settings = {codePolicy: "off"};
         const select = S.buildPolicySelect(i18n, "codePolicy", settings, (s) => (saved = s));
-        assert(select.value === "pass", "已存 pass 值时下拉初始为 pass", select.value);
+        assert(select.value === "off", "已存 off 值时下拉初始为 off", select.value);
         // 顶栏先改策略、再打开面板：新元素必须读到新值
-        settings.codePolicy = "fix";
+        settings.codePolicy = "smart";
         let saved2 = null;
         const select2 = S.buildPolicySelect(i18n, "codePolicy", settings, (s) => (saved2 = s));
-        assert(select2.value === "fix", "面板元素动态读取（顶栏改后不显示旧值）", select2.value);
+        assert(select2.value === "smart", "面板元素动态读取（顶栏改后不显示旧值）", select2.value);
         // 变更下拉即时落盘
-        select2.value = "smart";
+        select2.value = "off";
         select2.dispatchEvent(new dom.window.Event("change"));
-        assert(settings.codePolicy === "smart" && saved2 && saved2.codePolicy === "smart", "change 即写 settings 与保存回调", JSON.stringify(saved2));
+        assert(settings.codePolicy === "off" && saved2 && saved2.codePolicy === "off", "change 即写 settings 与保存回调", JSON.stringify(saved2));
+        // 三档下拉：conservative 可选中
+        const settings3 = {aiPolicy: "conservative"};
+        const select3 = S.buildPolicySelect(i18n, "aiPolicy", settings3, () => {});
+        assert(select3.value === "conservative", "AI 下拉初始为 conservative", select3.value);
     }
 
     console.log("== 5. 提示开关 ==");

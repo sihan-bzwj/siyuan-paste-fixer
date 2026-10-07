@@ -182,7 +182,7 @@ async function main() {
         assert(s === "code-target", "粘贴目标是代码块时即使内容含 \\frac 也放行", s);
     }
 
-    console.log("== 4. 路由裁决（planPasteHandling） ==");
+    console.log("== 4. 路由裁决（planPasteHandling：智能/保守/关闭三档） ==");
     {
         const plan = (plain, html = "", sy = "", inCode = false, policy = () => "smart") =>
             planPasteHandling({textPlain: plain, textHTML: html, siyuanHTML: sy, inCodeTarget: inCode, getPolicy: policy});
@@ -192,9 +192,26 @@ async function main() {
         assert(plan("", "", '<span data-type="inline-math">x</span>').action === "pass", "思源内部复制 → 放行");
         assert(plan(R`\frac{a}{b} 说明`).action === "fix", "AI 数学 smart → 进入修复管线");
         const passPolicy = plan(R`\frac{a}{b} 说明`, "", "", false, (s) => (s === "ai-latex" ? "pass" : "smart"));
-        assert(passPolicy.action === "pass" && passPolicy.hint === true, "AI 数学 pass → 放行+提示");
+        assert(passPolicy.action === "pass" && passPolicy.hint === true, "AI 数学 legacy pass → 放行+提示");
         const fixPolicy = plan("const a = 1;", "", "", false, (s) => (s === "code-content" ? "fix" : "smart"));
-        assert(fixPolicy.scenario === "code-content" && fixPolicy.action === "fix", "代码内容 fix 策略 → 进入修复管线", JSON.stringify(fixPolicy));
+        assert(fixPolicy.scenario === "code-content" && fixPolicy.action === "pass" && fixPolicy.hint === true,
+            "代码内容 legacy fix（等同 smart）→ 放行+提示", JSON.stringify(fixPolicy));
+        // v0.2.9 三档：off 静默、conservative 仅提示
+        const offPolicy = plan(R`\frac{a}{b} 说明`, "", "", false, (s) => (s === "ai-latex" ? "off" : "smart"));
+        assert(offPolicy.action === "pass" && offPolicy.hint === false, "AI 数学 off → 静默放行", JSON.stringify(offPolicy));
+        const consPolicy = plan(R`\frac{a}{b} 说明`, "", "", false, (s) => (s === "ai-latex" ? "conservative" : "smart"));
+        assert(consPolicy.action === "pass" && consPolicy.hint === true, "AI 数学 conservative → 放行+提示");
+        const codeOff = plan("const a = 1;", "", "", false, (s) => (s === "code-content" ? "off" : "smart"));
+        assert(codeOff.action === "pass" && codeOff.hint === false, "代码内容 off → 静默放行");
+        // 未定界 LaTeX：默认 smart 现在直接自动转换
+        const bare = R`\alpha 与 \beta 记号说明`;
+        const uSmart = plan(bare);
+        assert(uSmart.scenario === "undelimited-latex" && uSmart.action === "fix",
+            "未定界 smart（默认）→ 自动转换", JSON.stringify(uSmart));
+        const uCons = plan(bare, "", "", false, (s) => (s === "undelimited-latex" ? "conservative" : "smart"));
+        assert(uCons.action === "pass" && uCons.hint === true, "未定界 conservative → 放行+提示");
+        const uOff = plan(bare, "", "", false, (s) => (s === "undelimited-latex" ? "off" : "smart"));
+        assert(uOff.action === "pass" && uOff.hint === false, "未定界 off → 静默放行");
     }
 
     console.log("== 5. tokenizeInlineMath：正文/公式/金额边界 ==");
