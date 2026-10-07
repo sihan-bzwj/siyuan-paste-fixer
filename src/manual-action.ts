@@ -560,6 +560,93 @@ async function applyPlainTextBlockById(id: string, text: string): Promise<void> 
         `<div data-node-id="${id}" data-type="NodeParagraph"><div contenteditable="true">${escaped}</div></div>`);
 }
 
+/** 被选区**完整覆盖**的块（文档序；部分相交的块不算——批量转换绝不改写未选内容）。 */
+function collectFullyCoveredBlocks(range: Range): HTMLElement[] {
+    const ancestor = range.commonAncestorContainer;
+    const rootEl = elementOf(ancestor);
+    const out: HTMLElement[] = [];
+    const visit = (el: Element): void => {
+        if (el.getAttribute("data-node-id") && nodeFullyCovered(el, range)) {
+            out.push(el as HTMLElement);
+        }
+    };
+    // 与 collectCoveredMathNodes 同款：root 自身可能就是块（整块选中时）
+    if (rootEl?.getAttribute("data-node-id")) {
+        visit(rootEl);
+    }
+    const walker = document.createTreeWalker(rootEl ?? document.body, NodeFilter.SHOW_ELEMENT);
+    let node: Node | null = walker.nextNode();
+    while (node) {
+        visit(node as Element);
+        node = walker.nextNode();
+    }
+    // 防御性去嵌套：块在思源里不嵌套，但若有异常 DOM 只保留最外层
+    return out.filter((b) => !out.some((other) => other !== b && other.contains(b)));
+}
+
+/**
+ * 跨块批量转换（逐块独立过闸，替代 v0.2.5 撤回的整段批处理）：
+ * - 只处理被选区**完整覆盖**的块；部分相交的块一律不动（绝不改写未选内容），
+ *   一个完整覆盖的块都没有时才提示（blockNeedsWholeBlock）；
+ * - 每块复用单块整块语义：类型白名单（NodeParagraph/NodeMathBlock）、块内无代码、
+ *   可安全序列化——任一道闸不过只跳过该块，绝不波及其他块；
+ * - 写回走 applyWholeBlock（updateBlock 保块 ID）。
+ * 返回消息 key：done / batchPartial / noChange / blockNeedsWholeBlock / 各拒绝 key。
+ */
+async function fixCrossBlockBatch(
+    ctx: ManualContext,
+    fixText: (md: string) => string,
+): Promise<string> {
+    const blocks = collectFullyCoveredBlocks(ctx.range);
+    if (blocks.length === 0) {
+        return "blockNeedsWholeBlock"; // 没有任何完整覆盖的块（首尾都只选中了一部分）
+    }
+    let fixed = 0;
+    let refused = 0;
+    let refuseKey = "crossBlockRefuse";
+    for (const block of blocks) {
+        if (!wholeBlockAllowed(block)) {
+            refused++;
+            refuseKey = "blockTypeRefuse";
+            continue;
+        }
+        let source: string | null;
+        if (block.getAttribute("data-type") === "NodeMathBlock") {
+            source = "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
+        } else {
+            const root = getBlockContentRoot(block) ?? block;
+            if (root.querySelector(CODE_TARGET_SELECTOR)) {
+                refused++;
+                refuseKey = "inCodeRange";
+                continue;
+            }
+            const sub = document.createRange();
+            sub.selectNodeContents(root);
+            const container = document.createElement("div");
+            container.appendChild(sub.cloneContents());
+            source = serializeSafeSelection(container);
+            if (source === null) {
+                refused++;
+                refuseKey = "blockRichRefuse";
+                continue;
+            }
+        }
+        if (!source.trim()) {
+            continue; // 空块：无可转换
+        }
+        const out = forceConvertMath(source, fixText);
+        if (out === null || out === source) {
+            continue; // 不像公式 / 本就无需转换
+        }
+        await applyWholeBlock(block, out);
+        fixed++;
+    }
+    if (fixed === 0) {
+        return refused > 0 ? refuseKey : "noChange";
+    }
+    return refused > 0 ? "batchPartial" : "done";
+}
+
 /**
  * 手动动作能力判定（右键菜单与执行入口共用同一口径，避免“菜单能点、执行拒绝”分叉）。
  * - fix：端点不在代码、非跨块、整块时块类型安全、选区内容可安全序列化；
@@ -595,13 +682,9 @@ export function getManualCapabilities(ctx: ManualContext): ManualCapabilities {
         return {canFix: false, fixReason: "inCodeRange", canRevert, revertReason: canRevert ? undefined : "noChange"};
     }
     if (ctx.block !== ctx.endBlock) {
-        // 跨块：fix 拒绝（整块语义无法保证）；revert 节点级安全（含代码跳过）
-        return {
-            canFix: false,
-            fixReason: "crossBlockRefuse",
-            canRevert,
-            revertReason: canRevert ? undefined : "noChange",
-        };
+        // 跨块：fix 走逐块批量（菜单保持可见，执行层逐块过闸并报结果）；
+        // revert 节点级安全（含代码跳过）
+        return {canFix: true, canRevert, revertReason: canRevert ? undefined : "noChange"};
     }
     let canFix = true;
     let fixReason: string | undefined;
@@ -637,7 +720,8 @@ export function getManualCapabilities(ctx: ManualContext): ManualCapabilities {
  *   <br>/加粗/链接/代码等结构天然保持）；无渲染公式的源码选区走文本路径
  *   （\n 还原为 <br>，不压平结构）。
  * 代码区域：fix 一律拒绝；revert 仅当端点本身在代码内才拒绝（选区含代码时
- * 跳过代码、仍还原其它公式）。跨块：fix 拒绝（整块语义无法保证），revert 节点级。
+ * 跳过代码、仍还原其它公式）。跨块：fix 逐块批量（每块必须完整选中、逐块过
+ * 类型/代码/富格式闸），revert 节点级。
  * 返回最终给用户的消息 key；失败抛错由调用方兜底提示。
  */
 export async function runManualAction(
@@ -690,9 +774,9 @@ export async function runManualAction(
             return "noChange"; // 跨块且无完整覆盖的公式节点：无可还原
         }
     }
-    // 跨块 fix：拒绝（跨块部分选择会改写整个首尾块/块类型）
+    // 跨块 fix：逐块批量（每块完整覆盖 + 单块同款门禁；部分相交整体拒绝）
     if (kind === "cross-block") {
-        return "crossBlockRefuse";
+        return fixCrossBlockBatch(ctx, fixText);
     }
     // 整块写回按块类型授权限（Heading/CodeBlock/未知块拒绝，防类型被意外改写）
     if (kind === "whole-block" && !wholeBlockAllowed(ctx.block)) {

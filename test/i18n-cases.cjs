@@ -39,7 +39,7 @@ const REQUIRED_KEYS = [
     "hintSwitchConservative", "hintSwitchSmart",
     "hintSwitchedConservative", "hintSwitchedSmart",
     "quickCode", "quickAI", "quickWeb", "quickMixed", "quickUndelimited", "quickHints",
-    "crossBlockRefuse", "blockNeedsWholeBlock", "blockRichRefuse",
+    "crossBlockRefuse", "batchPartial", "blockNeedsWholeBlock", "blockRichRefuse",
     "blockTypeRefuse", "inCodeRange", "hintRichPreserved", "hintPasteRepair",
 ];
 

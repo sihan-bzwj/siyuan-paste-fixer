@@ -123,23 +123,102 @@ async function main() {
         document.body.innerHTML = "";
     }
 
-    console.log("== 4. 跨块：逐块批处理（保留各自 block ID） ==");
+    console.log("== 4. 跨块批量转换：逐块过闸（v0.2.9，替代 v0.2.5 撤回的整段批处理） ==");
     {
+        // 4a. 多段全部完整选中：各自转换、保留各自 block ID
         let updateCalls = [];
         global.fetch = async (url, opts) => {
             if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
             return {ok: true, json: async () => ({code: 0})};
         };
         const editor = mkEditor();
-        const b1 = mkBlock(editor, "b1", "段落一");
-        const b2 = mkBlock(editor, "b2", "段落二");
+        mkBlock(editor, "b1", "x_i + 1");
+        mkBlock(editor, "b2", "y_2");
+        mkBlock(editor, "b3", "z_3");
         const range = document.createRange();
-        range.setStart(b1.firstChild, 0);
-        range.setEnd(b2.firstChild, 3);
+        range.setStart(editor.firstChild, 0);
+        range.setEnd(editor.lastChild, editor.lastChild.childNodes.length);
         const ctx = M.captureManualContext(range, null);
         const key = await M.runManualAction(ctx, "fix", fixLatexText, convertToPlain);
-        assert(key === "crossBlockRefuse", "跨块拒绝（v0.2.5 撤回批处理：部分选择/Heading 语义风险）", key);
-        assert(updateCalls.length === 0, "未触发 updateBlock");
+        assert(key === "done", "三段完整选中批量转换返回 done", key);
+        assert(updateCalls.length === 3, "三段各自 updateBlock", String(updateCalls.length));
+        assert(JSON.stringify(updateCalls.map((c) => c.id)) === JSON.stringify(["b1", "b2", "b3"]),
+            "按文档序保留各自 block ID", JSON.stringify(updateCalls.map((c) => c.id)));
+        assert(updateCalls.every((c) => c.dataType === "markdown" && /^\$x_[i23] [+] 1\$$|^\$y_2\$$|^\$z_3\$/.test(c.data)),
+            "每块独立包裹公式", JSON.stringify(updateCalls.map((c) => c.data)));
+        document.body.innerHTML = "";
+
+        // 4b. 部分选中：部分相交的块不动，完整覆盖的尾块照转（绝不改写未选内容）
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        updateCalls = [];
+        const editor2 = mkEditor();
+        const p1 = mkBlock(editor2, "c1", "x_1");
+        mkBlock(editor2, "c2", "y_2");
+        const range2 = document.createRange();
+        range2.setStart(p1.firstChild, 1);
+        range2.setEnd(editor2.lastChild, editor2.lastChild.childNodes.length);
+        const ctx2 = M.captureManualContext(range2, null);
+        const key2 = await M.runManualAction(ctx2, "fix", fixLatexText, convertToPlain);
+        assert(key2 === "done", "首块部分选中：完整覆盖的尾块照转", key2);
+        assert(JSON.stringify(updateCalls.map((c) => c.id)) === JSON.stringify(["c2"]),
+            "部分相交的首块未被改写", JSON.stringify(updateCalls.map((c) => c.id)));
+        document.body.innerHTML = "";
+
+        // 4b-ii. 首尾块都只选中一部分 → 无完整覆盖块 → 提示选整段
+        updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor2b = mkEditor();
+        const q1 = mkBlock(editor2b, "e1", "x_1");
+        const q2 = mkBlock(editor2b, "e2", "y_2");
+        const range2b = document.createRange();
+        range2b.setStart(q1.firstChild, 1);
+        range2b.setEnd(q2.firstChild, 2);
+        const ctx2b = M.captureManualContext(range2b, null);
+        const key2b = await M.runManualAction(ctx2b, "fix", fixLatexText, convertToPlain);
+        assert(key2b === "blockNeedsWholeBlock", "首尾都部分选中 → blockNeedsWholeBlock", key2b);
+        assert(updateCalls.length === 0, "拒绝时不触发 updateBlock");
+        document.body.innerHTML = "";
+
+        // 4c. Heading 混入 → 跳过该块、其余照转（batchPartial）
+        updateCalls = [];
+        global.fetch = async (url, opts) => {
+            if (String(url).includes("updateBlock")) updateCalls.push(JSON.parse(opts.body));
+            return {ok: true, json: async () => ({code: 0})};
+        };
+        const editor3 = mkEditor();
+        mkBlock(editor3, "g1", "x_1");
+        const heading = document.createElement("div");
+        heading.setAttribute("data-node-id", "hd");
+        heading.setAttribute("data-type", "NodeHeading");
+        heading.textContent = "y_2 标题";
+        editor3.appendChild(heading);
+        mkBlock(editor3, "g2", "z_3");
+        const range3 = document.createRange();
+        range3.setStart(editor3.firstChild, 0);
+        range3.setEnd(editor3.lastChild, editor3.lastChild.childNodes.length);
+        const ctx3 = M.captureManualContext(range3, null);
+        const key3 = await M.runManualAction(ctx3, "fix", fixLatexText, convertToPlain);
+        assert(key3 === "batchPartial", "Heading 混入 → 部分转换提示 batchPartial", key3);
+        assert(updateCalls.length === 2 && updateCalls.every((c) => c.id !== "hd"),
+            "Heading 块未被改写，其余两块照转", JSON.stringify(updateCalls.map((c) => c.id)));
+        document.body.innerHTML = "";
+
+        // 4d. 全部无公式 → noChange
+        const editor4 = mkEditor();
+        mkBlock(editor4, "d1", "段落一");
+        mkBlock(editor4, "d2", "段落二");
+        const range4 = document.createRange();
+        range4.setStart(editor4.firstChild, 0);
+        range4.setEnd(editor4.lastChild, editor4.lastChild.childNodes.length);
+        const ctx4 = M.captureManualContext(range4, null);
+        const key4 = await M.runManualAction(ctx4, "fix", fixLatexText, convertToPlain);
+        assert(key4 === "noChange", "全部无公式 → noChange", key4);
         document.body.innerHTML = "";
     }
 

@@ -349,7 +349,7 @@ async function main() {
         document.body.innerHTML = "";
     }
 
-    console.log("== 13. 跨块选区：只显示「还原为纯文本」（公式）/ 不显示（无公式） ==");
+    console.log("== 13. 跨块选区：fix（逐块批量）+ 还原（节点级）双入口 ==");
     {
         const editor = mkEditor();
         const b1 = document.createElement("div");
@@ -372,7 +372,7 @@ async function main() {
         sel.addRange(range);
         rightClick(b1);
         handlers.onCommonMenuOpen({detail: {menu: {element: menu}}});
-        assert(actions(menu).sort().join(",") === "revert", "跨块含公式：只显示「还原为纯文本」", actions(menu).sort().join(","));
+        assert(actions(menu).sort().join(",") === "fix,revert", "跨块含公式：显示 fix（逐块批量）+ 还原", actions(menu).sort().join(","));
         // 点击后节点级还原
         menu.querySelector('[data-paste-fixer-action="revert"]').click();
         await tick();
@@ -382,7 +382,7 @@ async function main() {
         done(handlers);
         document.body.innerHTML = "";
 
-        // 跨块无公式：什么都不显示
+        // 跨块无公式：只显示「强制转换为公式」（执行层报 noChange）
         const editor2 = mkEditor();
         const n1 = mkBlock(editor2, "n1", "甲");
         const n2 = mkBlock(editor2, "n2", "乙");
@@ -396,7 +396,7 @@ async function main() {
         sel2.addRange(r2);
         rightClick(n1);
         h2.onCommonMenuOpen({detail: {menu: {element: menu2}}});
-        assert(menu2.querySelectorAll("[data-paste-fixer-owned]").length === 0, "跨块无公式：不显示任何项");
+        assert(actions(menu2).join(",") === "fix", "跨块无公式：显示强制转换（执行层报 noChange）", actions(menu2).join(","));
         done(h2);
         document.body.innerHTML = "";
     }
