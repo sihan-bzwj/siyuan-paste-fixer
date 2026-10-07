@@ -20,8 +20,7 @@
   "settingMixedTitle": "混合内容策略",
   "settingMixedDesc": "数学信号与普通正文混合时的处理方式",
   "settingUndelimitedTitle": "未定界 LaTeX 策略",
-  "settingUndelimitedDesc": "粘贴内容含裸 LaTeX 命令（\lor、
-eg 等无定界符，AI 纯文本常见）时的处理方式；「智能」= 原样+提示，「始终修复」= 自动为公式片段包裹 $..$",
+  "settingUndelimitedDesc": "粘贴内容含裸 LaTeX 命令（\\lor、\\neg 等无定界符，AI 纯文本常见）时的处理方式；「智能」= 原样+提示，「始终修复」= 自动为公式片段包裹 $..$",
   "settingSmart": "智能（推荐）",
   "settingFix": "始终修复公式",
   "settingPass": "始终原样粘贴",
@@ -31,7 +30,7 @@ eg 等无定界符，AI 纯文本常见）时的处理方式；「智能」= 原
   "hintAI": "已识别为 AI 数学文本，修复 {n} 个公式",
   "hintWeb": "已识别为网页公式，转换 {n} 个公式",
   "hintMixed": "已修复 {n} 个公式",
-  "hintUndelimited": "检测到未定界的 LaTeX 公式（裸 \命令，原样粘贴）。可在设置中将「未定界 LaTeX 策略」改为「始终修复公式」自动转换，或选中后右键「强制转换为公式」",
+  "hintUndelimited": "检测到未定界的 LaTeX 公式（裸 \\ 命令，原样粘贴）。可在设置中将「未定界 LaTeX 策略」改为「始终修复公式」自动转换，或选中后右键「强制转换为公式」",
   "quickCode": "代码内容修复公式",
   "quickAI": "AI 数学文本修复",
   "quickWeb": "网页公式转换",
