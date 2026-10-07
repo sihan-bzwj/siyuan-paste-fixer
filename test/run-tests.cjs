@@ -401,6 +401,21 @@ async function main() {
     multi = fixLatexText("单行 $x^2$ 测试");
     assert(multi === "单行 $x^2$ 测试", "单行公式保持行内（不升级）", JSON.stringify(multi));
 
+    console.log("== 8. 裸 LaTeX 无定界符的 AI 总结（对偶与范式夹具）：逐字保留 ==");
+    // AI 聊天复制的纯文本：裸 \lor/\land/\neg 命令散布中文正文、无任何定界符。
+    // 括号只是大公式的碎片（括号外还有裸命令）——零散转换会产生"公式+裸命令"
+    // 混合态，比原样更差；整篇逐字保留（自动保守，公式可选中后右键强制转换）。
+    const duelRaw = fs.readFileSync(path.join(__dirname, "fixtures/duel-normalform-plain.txt"), "utf-8");
+    const duelOut = fixLatexText(duelRaw);
+    assert(duelOut === duelRaw, "无定界符 AI 数学文本逐字保留（括号碎片不零散转换）",
+        "改动行数: " + duelRaw.split("\n").filter((l, i) => l !== duelOut.split("\n")[i]).length);
+    assert(fixLatexText("(P \\land Q) \\lor (\\neg P \\land R)") === "(P \\land Q) \\lor (\\neg P \\land R)",
+        "括号外有裸命令 → 括号不零散转换");
+    assert(fixLatexText("\\neg A(P_1, P_2) \\Leftrightarrow A^*(\\neg P_1)") === "\\neg A(P_1, P_2) \\Leftrightarrow A^*(\\neg P_1)",
+        "定理行括号外有 \\Leftrightarrow → 原样");
+    assert(fixLatexText("矩阵 (W_{ij}) 的转置") === "矩阵 $(W_{ij})$ 的转置",
+        "独立括号公式（括号外无命令）仍正常转换");
+
     console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
     process.exit(failed > 0 ? 1 : 0);
 }

@@ -456,8 +456,24 @@ function looksLikeParenMath(content: string): boolean {
 /** `(` 前是这些关键字/标识符时跳过：\left(、\big(、函数调用 f(x)、链接 ]( */
 const PAREN_GUARD_RE = /(?:left|right|[bB]ig[lmr]?|[bB]igg[lmr]?)$/;
 
+/**
+ * 行内括号**之外**是否还有裸 LaTeX 命令。
+ *
+ * 命中说明括号只是大公式的一部分（AI 聊天复制时定界符全丢的典型形态，如
+ * `(P \land Q) \lor (\neg P \land R)`）：此时把括号子式零散转成行内公式会得到
+ * “公式 + 裸命令正文”的混合态，比原样更差——整行保守放行。
+ */
+function hasBareCommandOutsideParens(line: string): boolean {
+    const outside = line.replace(/\([^()]*\)/g, "()");
+    return /\\[a-zA-Z]+/.test(outside);
+}
+
 /** 平衡括号扫描 `( ... )`，把像数学的内容转成 $ ... $ */
 function convertParenMath(text: string, hold: (math: string) => string): string {
+    // 逐行预检：括号外存在裸命令的行整体跳过（独立括号公式如 (W_{ij}) 不受影响）
+    if (text.split("\n").some(hasBareCommandOutsideParens)) {
+        return text;
+    }
     let out = "";
     let i = 0;
     while (i < text.length) {
