@@ -522,6 +522,8 @@ export default class PasteFixer extends Plugin {
         // 通道 1：事件总线（唯一转换入口）+ 菜单官方通路/单例弹出事件
         this.eventBus.on("paste", this.onPaste);
         this.eventBus.on("open-menu-content", menuHandlers.onOpenMenuContent as never);
+        // 块菜单（Ctrl+A/块柄选块后右键）：text-process 同款通路，块选中态的右键不走 open-menu-content
+        this.eventBus.on("click-blockicon", menuHandlers.onBlockIconMenu as never);
         // 思源 v3.8.2 的菜单单例弹出事件（SDK 1.2.4 类型未收录，运行时存在）
         this.eventBus.on("common-menu-open" as keyof IEventBusMap, menuHandlers.onCommonMenuOpen as never);
         // 通道 2：原生 paste 只捕获上下文（捕获阶段，编辑器内才记录）
@@ -563,6 +565,7 @@ export default class PasteFixer extends Plugin {
         this.eventBus.off("paste", this.onPaste);
         if (this.menuHandlers) {
             this.eventBus.off("open-menu-content", this.menuHandlers.onOpenMenuContent as never);
+            this.eventBus.off("click-blockicon", this.menuHandlers.onBlockIconMenu as never);
             this.eventBus.off("common-menu-open" as keyof IEventBusMap, this.menuHandlers.onCommonMenuOpen as never);
         }
     }

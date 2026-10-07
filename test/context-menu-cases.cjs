@@ -401,6 +401,55 @@ async function main() {
         document.body.innerHTML = "";
     }
 
+    console.log("== 13b. 块菜单（click-blockicon）：Ctrl+A/块柄选块后的右键通路 ==");
+    {
+        // text-process 同款：块选中态右键弹出的是块菜单而非内容菜单，
+        // 必须单独注册 click-blockicon 才能在该通路出现
+        const editor = mkEditor();
+        const b1 = document.createElement("div");
+        b1.setAttribute("data-node-id", "k1");
+        b1.setAttribute("data-type", "NodeParagraph");
+        b1.textContent = "x_1";
+        editor.appendChild(b1);
+        const b2 = document.createElement("div");
+        b2.setAttribute("data-node-id", "k2");
+        b2.setAttribute("data-type", "NodeParagraph");
+        b2.textContent = "y_2";
+        editor.appendChild(b2);
+        const {handlers} = makeHandlers(false);
+        const added = [];
+        handlers.onBlockIconMenu({detail: {menu: {addItem: (opt) => added.push(opt.label)}, blockElements: [b1, b2], protyle: null}});
+        assert(added.length === 1 && added[0] === "强制转换为公式", "块菜单跨块选中：显示强制转换（逐块批量）", JSON.stringify(added));
+        document.body.innerHTML = "";
+
+        // 反向选择（块数组逆序）：首尾摆正后同样显示
+        const editor2 = mkEditor();
+        const c1 = document.createElement("div");
+        c1.setAttribute("data-node-id", "r1");
+        c1.setAttribute("data-type", "NodeParagraph");
+        c1.textContent = "x_1";
+        editor2.appendChild(c1);
+        const c2 = document.createElement("div");
+        c2.setAttribute("data-node-id", "r2");
+        c2.setAttribute("data-type", "NodeParagraph");
+        c2.textContent = "y_2";
+        editor2.appendChild(c2);
+        const {handlers: h3} = makeHandlers(false);
+        const added3 = [];
+        h3.onBlockIconMenu({detail: {menu: {addItem: (opt) => added3.push(opt.label)}, blockElements: [c2, c1], protyle: null}});
+        assert(added3.length === 1 && added3[0] === "强制转换为公式", "块数组逆序：摆正首尾后同样显示", JSON.stringify(added3));
+        document.body.innerHTML = "";
+
+        // 块菜单空元素 / 缺参：不抛错不加项
+        const {handlers: h4} = makeHandlers(false);
+        let added4 = 0;
+        h4.onBlockIconMenu({detail: {menu: {addItem: () => added4++}, blockElements: [], protyle: null}});
+        h4.onBlockIconMenu({detail: {}});
+        assert(added4 === 0, "缺参/空选块不加项");
+        done(h4);
+        document.body.innerHTML = "";
+    }
+
     console.log("== 14. Heading 整块选中：菜单不显示「强制转换」（块类型门禁同源） ==");
     {
         const editor = mkEditor();

@@ -49,6 +49,8 @@ function menuActionsFor(ctx: ManualContext): {fix: boolean, revert: boolean} {
 
 export interface MenuHandlers {
     onOpenMenuContent: (event: CustomEvent<{menu: {addItem: (opt: unknown) => void}, range: Range}>) => void;
+    /** 块菜单（Ctrl+A/块柄选块后右键，或点块柄弹出）：与 text-process 同款通路 */
+    onBlockIconMenu: (event: CustomEvent<{menu: {addItem: (opt: unknown) => void}, blockElements?: HTMLElement[], protyle?: unknown}>) => void;
     onCommonMenuOpen: (event: CustomEvent<unknown>) => void;
     onContextMenu: (event: MouseEvent) => void;
     dispose: () => void;
@@ -227,11 +229,40 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
         }
     };
 
+    // 块菜单（与 text-process 同款通路）：Ctrl+A / 块柄多选 / 块柄右键弹出的是
+    // click-blockicon 菜单而非内容菜单——不注册它，块选中态右键就什么都看不到。
+    // 用选中块的首尾构造跨块 range，走与内容菜单完全同一套能力判定与动作。
+    const onBlockIconMenu = (event: CustomEvent<{menu: {addItem: (opt: unknown) => void}, blockElements?: HTMLElement[], protyle?: unknown}>) => {
+        try {
+            const {menu, blockElements, protyle} = event.detail || {};
+            if (!menu || !blockElements || blockElements.length === 0) {
+                return;
+            }
+            const first = blockElements[0];
+            const last = blockElements[blockElements.length - 1];
+            if (!first?.isConnected || !last?.isConnected) {
+                return;
+            }
+            // 块数组可能与选择方向相反（从下往上选）：按文档序摆正首尾
+            // DOCUMENT_POSITION_FOLLOWING = 4（Node 常量在部分运行环境不可用，用字面量）
+            const pos = first.compareDocumentPosition(last);
+            const [startEl, endEl] = (pos & 4) ? [first, last] : [last, first];
+            const menuRange = document.createRange();
+            // 端点用块元素内容级坐标（(el,0)-(el,len)）：resolveLeafBlock 才能从
+            // 容器推导出首尾块，进入跨块分类（setStartBefore 会在父容器上解析不到块）
+            menuRange.setStart(startEl, 0);
+            menuRange.setEnd(endEl, endEl.childNodes.length);
+            addContextualItems(menu, captureContext(menuRange, protyle));
+        } catch (e) {
+            console.error("[paste-fixer] 块菜单注册失败", e);
+        }
+    };
+
     const dispose = (): void => {
         cancelFallback();
         // 清理可能残留的注入项（按钮 + 分隔线）
         document.querySelectorAll(`[${OWNED_ATTR}]`).forEach((n) => n.remove());
     };
 
-    return {onContextMenu, onOpenMenuContent, onCommonMenuOpen, dispose};
+    return {onContextMenu, onOpenMenuContent, onBlockIconMenu, onCommonMenuOpen, dispose};
 }
