@@ -14,3 +14,4 @@ test/_siyuan-stub.cjs
 test/_paste-context.cjs
 test/_siyuan-dom.cjs
 test/_post-paste-repair.cjs
+test/_undelimited.cjs
