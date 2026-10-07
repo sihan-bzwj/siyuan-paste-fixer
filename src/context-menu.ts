@@ -14,6 +14,7 @@
  */
 
 import { captureManualContext, getManualCapabilities, ManualContext, runManualAction } from "./manual-action";
+import { elementOf } from "./siyuan-dom";
 
 export interface MenuDeps {
     i18n: Record<string, string>;
@@ -28,6 +29,11 @@ const OWNED_ATTR = "data-paste-fixer-owned";
 const MENU_INTERACTION_ATTR = "data-paste-fixer-interaction";
 /** 末班车窗口：事件通路晚于此时仍未处理，直接注入当前可见菜单 */
 const FALLBACK_WINDOW_MS = 500;
+
+/** 当前可见的思源菜单根（b3-menu 全局单例复用，最后一个即最新弹出）。 */
+function visibleMenuRoot(): HTMLElement | undefined {
+    return Array.from(document.querySelectorAll(".b3-menu")).pop() as HTMLElement | undefined;
+}
 
 /**
  * 菜单项按上下文显示——与 runManualAction 共用 getManualCapabilities（同源，
@@ -71,17 +77,20 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
         root.querySelectorAll(`[${OWNED_ATTR}]`).forEach((n) => n.remove());
     };
 
+    /** 执行手动动作并提示结果（官方 addItem 与 DOM 注入两条通路共用）。 */
+    const runAction = (ctx: ManualContext, kind: "fix" | "revert"): void => {
+        void runManualAction(ctx, kind, deps.fixText, deps.convertToPlain)
+            .then((key) => deps.showMessage(deps.i18nGet(key), 3000))
+            .catch((e) => {
+                console.error("[paste-fixer] 手动动作失败", e);
+                deps.showMessage(deps.i18nGet("fail") + ": " + (e instanceof Error ? e.message : String(e)), 5000, "error");
+            });
+    };
+
     const singleItem = (label: string, kind: "fix" | "revert", ctx: ManualContext) => ({
         icon: "iconMath",
         label,
-        click: (): void => {
-            void runManualAction(ctx, kind, deps.fixText, deps.convertToPlain)
-                .then((key) => deps.showMessage(deps.i18nGet(key), 3000))
-                .catch((e) => {
-                    console.error("[paste-fixer] 手动动作失败", e);
-                    deps.showMessage(deps.i18nGet("fail") + ": " + (e instanceof Error ? e.message : String(e)), 5000, "error");
-                });
-        },
+        click: (): void => runAction(ctx, kind),
     });
 
     /** 从右键事件构建操作上下文，并分配本次 interaction 编号 */
@@ -112,14 +121,7 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
             el.innerHTML = '<svg class="b3-menu__icon"><use xlink:href="#iconMath"></use></svg>' +
                 '<span class="b3-menu__text"></span>';
             (el.querySelector(".b3-menu__text") as HTMLElement).textContent = label;
-            el.addEventListener("click", () => {
-                void runManualAction(ctx, kind, deps.fixText, deps.convertToPlain)
-                    .then((key) => deps.showMessage(deps.i18nGet(key), 3000))
-                    .catch((e) => {
-                        console.error("[paste-fixer] 手动动作失败", e);
-                        deps.showMessage(deps.i18nGet("fail") + ": " + (e instanceof Error ? e.message : String(e)), 5000, "error");
-                    });
-            });
+            el.addEventListener("click", () => runAction(ctx, kind));
             return el;
         };
         const sep = document.createElement("div");
@@ -171,8 +173,7 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
             if (detail?.menu && typeof detail.menu.addItem === "function") {
                 addContextualItems(detail.menu as {addItem: (opt: unknown) => void}, activeContext);
             } else {
-                const root = detail?.menu?.element ??
-                    Array.from(document.querySelectorAll(".b3-menu")).pop() as HTMLElement | undefined;
+                const root = detail?.menu?.element ?? visibleMenuRoot();
                 if (root) {
                     injectIntoMenu(activeContext, root);
                 }
@@ -198,9 +199,7 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
             const sel = window.getSelection();
             if (sel && sel.rangeCount > 0) {
                 const r = sel.getRangeAt(0);
-                const el = r.startContainer.nodeType === 1
-                    ? r.startContainer as Element
-                    : (r.startContainer.parentElement as Element | null);
+                const el = elementOf(r.startContainer);
                 if (el?.closest?.(".protyle-wysiwyg") === editor) {
                     menuRange = r;
                 }
@@ -216,7 +215,7 @@ export function createMenuHandlers(deps: MenuDeps): MenuHandlers {
             fallbackTimer = window.setTimeout(() => {
                 // 事件通路均未处理：向当前可见菜单注入一次（不猜新菜单）
                 if (armed && !handled && activeContext) {
-                    const root = Array.from(document.querySelectorAll(".b3-menu")).pop() as HTMLElement | undefined;
+                    const root = visibleMenuRoot();
                     if (root) {
                         injectIntoMenu(activeContext, root);
                     }

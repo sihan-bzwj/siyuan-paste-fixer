@@ -20,11 +20,14 @@
  */
 
 import {
+    CJK_FULLWIDTH_RE,
     fixLatexText,
     MathToken,
     scanDollarMath,
     tokenizeMath,
 } from "./fix-latex";
+import {CODE_TARGET_SELECTOR} from "./paste-context";
+import {elementOf} from "./siyuan-dom";
 
 export interface ManualContext {
     /** 右键事件传入 range 的快照（唯一操作上下文） */
@@ -50,7 +53,7 @@ export type ManualActionKind =
     | "none";
 
 /** 生成真实 inline-math span（思源渲染节点形态）。 */
-export function buildInlineMathElement(content: string): HTMLSpanElement {
+function buildInlineMathElement(content: string): HTMLSpanElement {
     const span = document.createElement("span");
     span.setAttribute("data-type", "inline-math");
     span.setAttribute("data-subtype", "math");
@@ -59,7 +62,7 @@ export function buildInlineMathElement(content: string): HTMLSpanElement {
 }
 
 /** 让编辑器持久化最近的 DOM 变更（思源 wysiwyg 监听 input 事件自动保存）。 */
-export function commitEditorChange(protyleElement: HTMLElement | null): void {
+function commitEditorChange(protyleElement: HTMLElement | null): void {
     if (!protyleElement) {
         return;
     }
@@ -67,13 +70,11 @@ export function commitEditorChange(protyleElement: HTMLElement | null): void {
 }
 
 /** 光标（collapsed）是否落在公式节点上。 */
-export function collapsedAtMath(range: Range): "inline" | "block" | null {
+function collapsedAtMath(range: Range): "inline" | "block" | null {
     if (!range.collapsed) {
         return null;
     }
-    const node = range.startContainer.nodeType === 1
-        ? range.startContainer as Element
-        : (range.startContainer.parentElement as Element | null);
+    const node = elementOf(range.startContainer);
     const inline = node?.closest?.('[data-type="inline-math"]');
     if (inline) {
         return "inline";
@@ -86,11 +87,8 @@ export function collapsedAtMath(range: Range): "inline" | "block" | null {
 }
 
 /** 节点所在最近块（含自身）：从 range 端点推导，不扫描整个文档。 */
-export function resolveLeafBlock(node: Node): HTMLElement | null {
-    if (!node) {
-        return null;
-    }
-    const el = node.nodeType === 1 ? node as Element : node.parentElement;
+function resolveLeafBlock(node: Node): HTMLElement | null {
+    const el = elementOf(node);
     if (!el || typeof el.closest !== "function") {
         return null;
     }
@@ -99,22 +97,17 @@ export function resolveLeafBlock(node: Node): HTMLElement | null {
 
 /** 从 range 推导所在编辑器（.protyle-wysiwyg）；分屏时不会选错编辑器。 */
 export function deriveProtyleElement(range: Range): HTMLElement | null {
-    const el = range.startContainer.nodeType === 1
-        ? range.startContainer as Element
-        : (range.startContainer.parentElement as Element | null);
+    const el = elementOf(range.startContainer);
     if (!el || typeof el.closest !== "function") {
         return null;
     }
     return el.closest(".protyle-wysiwyg") as HTMLElement | null;
 }
 
-/** 代码目标选择器：代码块 / 行内代码（官方 DOM 为 span[data-type="code"]）。 */
-export const CODE_TARGET_SELECTOR = '[data-type="NodeCodeBlock"], [data-type="NodeInlineCode"], [data-type="code"]';
-
 /** range 端点（start/end 容器）是否落在代码区域内。 */
 function rangeEndpointsInCode(range: Range): boolean {
     const check = (node: Node): boolean => {
-        const el = node.nodeType === 1 ? node as Element : node.parentElement;
+        const el = elementOf(node);
         return el?.closest?.(CODE_TARGET_SELECTOR) !== null;
     };
     return check(range.startContainer) || check(range.endContainer);
@@ -132,12 +125,12 @@ function rangeContainsCode(range: Range): boolean {
  * 代码块/行内代码就整体排除——issue #1 的“限制插件功能范围”硬边界。
  * 返回 true 表示该 range 落在代码区域内，插件不参与。
  */
-export function isCodeRange(range: Range): boolean {
+function isCodeRange(range: Range): boolean {
     return rangeEndpointsInCode(range) || rangeContainsCode(range);
 }
 
 /** 块正文根（editable 子树）：安全检查与源码提取统一只看这里，排除 .protyle-attr 等编辑器结构。 */
-export function getBlockContentRoot(block: HTMLElement): HTMLElement {
+function getBlockContentRoot(block: HTMLElement): HTMLElement {
     return (block.querySelector('[contenteditable="true"]') as HTMLElement | null) ?? block;
 }
 
@@ -148,7 +141,7 @@ export function getBlockContentRoot(block: HTMLElement): HTMLElement {
 const WHOLE_BLOCK_SAFE_TYPES = new Set(["NodeParagraph", "NodeMathBlock"]);
 
 /** 整块操作是否允许（按块类型授写权限）。 */
-export function wholeBlockAllowed(block: HTMLElement | null): boolean {
+function wholeBlockAllowed(block: HTMLElement | null): boolean {
     return block !== null && WHOLE_BLOCK_SAFE_TYPES.has(block.getAttribute("data-type") || "");
 }
 
@@ -267,7 +260,7 @@ function hasUnselectedContent(block: HTMLElement, range: Range): boolean {
 }
 
 /** 判定选区类型：局部行内 / 完整单块 / 跨块（起止最近块不同即跨块）。 */
-export function classifyRange(
+function classifyRange(
     range: Range,
     block: HTMLElement | null,
     endBlock: HTMLElement | null,
@@ -315,7 +308,7 @@ function hasUnsafeRichElement(node: Node): boolean {
 }
 
 /** 块内是否含需要拒绝整块转换的语义元素（基于正文 contenteditable root）。 */
-export function hasRichFormatting(block: HTMLElement | null): boolean {
+function hasRichFormatting(block: HTMLElement | null): boolean {
     if (!block) {
         return false;
     }
@@ -333,7 +326,7 @@ function removeEmptySplitTail(last: Node): void {
 }
 
 /** 局部行内替换：把转换结果整段解析成文本/公式片段，一次替换选区（正文不丢失）。 */
-export function applyLocalFragment(
+function applyLocalFragment(
     range: Range,
     tokens: MathToken[],
     protyleElement: HTMLElement | null,
@@ -371,12 +364,12 @@ export function applyLocalFragment(
  * 只拒绝空选择与纯中文/全角句子（无任何数学信号，防误点）；x、f(x)、a,b、123
  * 等简单表达式直接放行。
  */
-export function looksLikeRawMathExpression(source: string): boolean {
+function looksLikeRawMathExpression(source: string): boolean {
     const t = source.trim();
     if (!t) {
         return false;
     }
-    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(t) &&
+    if (CJK_FULLWIDTH_RE.test(t) &&
         !/\\[A-Za-z]+|[_^=+*/<>≤≥×÷]/.test(t)) {
         return false; // 纯中文句子（无数学信号）
     }
@@ -392,7 +385,7 @@ export function looksLikeRawMathExpression(source: string): boolean {
  *    包装分支保留源码两侧空白（局部 "A x B" 选 " x " → " $x$ "，空格不丢）。
  * 返回 null 表示“选中内容不像公式”。
  */
-export function forceConvertMath(source: string, fixText: (md: string) => string): string | null {
+function forceConvertMath(source: string, fixText: (md: string) => string): string | null {
     if (!looksLikeRawMathExpression(source)) {
         return null;
     }
@@ -414,19 +407,12 @@ export function forceConvertMath(source: string, fixText: (md: string) => string
     return leading + (/^\$[^$\n]+\$$/.test(trimmed) ? trimmed : "$" + trimmed + "$") + trailing;
 }
 
-/** 完整单块：内核 updateBlock（保留原 block ID，不删除重建）。 */
-export async function applyWholeBlock(
-    block: HTMLElement,
-    markdown: string,
-): Promise<void> {
-    const id = block.getAttribute("data-node-id");
-    if (!id) {
-        throw new Error("block id missing");
-    }
+/** 内核 updateBlock 统一封装：HTTP 与 kernel code 双重检查，失败抛错（调用方 fail-closed）。 */
+async function postUpdateBlock(id: string, dataType: "markdown" | "dom", data: string): Promise<void> {
     const r = await fetch("/api/block/updateBlock", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({id, dataType: "markdown", data: markdown}),
+        body: JSON.stringify({id, dataType, data}),
     });
     if (!r.ok) {
         throw new Error("updateBlock http " + r.status);
@@ -437,14 +423,16 @@ export async function applyWholeBlock(
     }
 }
 
-/** 块 → 源码：公式块读 data-content；普通块只序列化正文 editable 子树
- *  （排除 .protyle-attr 等编辑器结构）。 */
-function blockSource(block: HTMLElement): string {
-    if (block.getAttribute("data-type") === "NodeMathBlock") {
-        return "$$\n" + (block.getAttribute("data-content") || "") + "\n$$";
+/** 完整单块：内核 updateBlock（保留原 block ID，不删除重建）。 */
+export async function applyWholeBlock(
+    block: HTMLElement,
+    markdown: string,
+): Promise<void> {
+    const id = block.getAttribute("data-node-id");
+    if (!id) {
+        throw new Error("block id missing");
     }
-    const editable = block.querySelector('[contenteditable="true"]') as HTMLElement | null;
-    return serializeSafeSelection(editable ?? block) ?? "";
+    await postUpdateBlock(id, "markdown", markdown);
 }
 
 /**
@@ -488,7 +476,7 @@ function collectCoveredMathNodes(
     // 从 range 公共祖先开始扫描：普通局部选区只扫一个块/段落，跨块时才自然
     // 扩大到共同祖先（不再每次右键扫整个编辑器）
     const ancestor = range.commonAncestorContainer;
-    const rootEl = (ancestor.nodeType === 1 ? ancestor : ancestor.parentElement) as Element | null;
+    const rootEl = elementOf(ancestor);
     const inline: Element[] = [];
     const blocks: Array<{id: string, content: string}> = [];
     const visit = (el: Element): void => {
@@ -553,25 +541,6 @@ async function revertCoveredMathNodes(
     return "revertDone";
 }
 
-/** 按块 id 更新（保 block ID；block 的 DOM 引用可能被内核重新渲染替换）。 */
-async function applyWholeBlockById(id: string, markdown: string): Promise<void> {
-    if (!id) {
-        throw new Error("block id missing");
-    }
-    const r = await fetch("/api/block/updateBlock", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({id, dataType: "markdown", data: markdown}),
-    });
-    if (!r.ok) {
-        throw new Error("updateBlock http " + r.status);
-    }
-    const j = await r.json() as {code: number, msg?: string};
-    if (j.code !== 0) {
-        throw new Error(j.msg || "updateBlock failed");
-    }
-}
-
 /**
  * 公式块 → 纯文本（**不经过 Markdown 解析**）：
  * 以 dom 类型明确构造 NodeParagraph，公式内容中的 `*`/`#`/`1.`/`_`/`[`
@@ -587,19 +556,8 @@ async function applyPlainTextBlockById(id: string, text: string): Promise<void> 
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/\n/g, "<br>");
-    const dom = `<div data-node-id="${id}" data-type="NodeParagraph"><div contenteditable="true">${escaped}</div></div>`;
-    const r = await fetch("/api/block/updateBlock", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({id, dataType: "dom", data: dom}),
-    });
-    if (!r.ok) {
-        throw new Error("updateBlock http " + r.status);
-    }
-    const j = await r.json() as {code: number, msg?: string};
-    if (j.code !== 0) {
-        throw new Error(j.msg || "updateBlock failed");
-    }
+    await postUpdateBlock(id, "dom",
+        `<div data-node-id="${id}" data-type="NodeParagraph"><div contenteditable="true">${escaped}</div></div>`);
 }
 
 /**
@@ -702,9 +660,7 @@ export async function runManualAction(
         if (action === "fix") {
             return "alreadyMath";
         }
-        const node = ctx.range.startContainer.nodeType === 1
-            ? ctx.range.startContainer as HTMLElement
-            : (ctx.range.startContainer.parentElement as HTMLElement | null);
+        const node = elementOf(ctx.range.startContainer);
         const inline = node?.closest('[data-type="inline-math"]') as HTMLElement | null;
         if (inline) {
             const content = inline.getAttribute("data-content") || "";

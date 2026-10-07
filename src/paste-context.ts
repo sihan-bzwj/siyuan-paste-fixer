@@ -10,6 +10,8 @@
  * （PASTE_CONTEXT_WINDOW_MS），过期或不匹配直接忽略，行为回到无快照默认。
  */
 
+import {elementOf} from "./siyuan-dom";
+
 export interface PasteContextSnapshot {
     /** 捕获时刻（Date.now()），供消费方做时效校验 */
     time: number;
@@ -26,7 +28,7 @@ export const PASTE_CONTEXT_WINDOW_MS = 500;
 /** 代码目标判定选择器（全插件统一；官方 DOM 行内代码是 span[data-type="code"]）。 */
 export const CODE_TARGET_SELECTOR = '[data-type="NodeCodeBlock"], [data-type="NodeInlineCode"], [data-type="code"]';
 
-/** caret 是否落在**当前编辑器**的代码目标内（paste 的 event.target 常是外层
+/** caret 是否落在**指定编辑器**的代码目标内（paste 的 event.target 常是外层
  *  contenteditable，真正光标可能在内部的行内代码 span 上；且分屏时另一编辑器
  *  的残留 selection 不能污染本次粘贴的判定）。 */
 function selectionInCodeTarget(expectedEditor: HTMLElement): boolean {
@@ -34,13 +36,9 @@ function selectionInCodeTarget(expectedEditor: HTMLElement): boolean {
     if (!sel || sel.rangeCount === 0) {
         return false;
     }
-    const node = sel.getRangeAt(0).startContainer;
-    const el = node.nodeType === 1 ? node as Element : node.parentElement;
-    if (!el) {
-        return false;
-    }
-    if (el.closest?.(".protyle-wysiwyg") !== expectedEditor) {
-        return false; // selection 不属于本次粘贴的编辑器
+    const el = elementOf(sel.getRangeAt(0).startContainer);
+    if (!el || el.closest?.(".protyle-wysiwyg") !== expectedEditor) {
+        return false; // selection 不属于该编辑器
     }
     return el.closest?.(CODE_TARGET_SELECTOR) !== null;
 }
@@ -52,22 +50,7 @@ function selectionInCodeTarget(expectedEditor: HTMLElement): boolean {
  */
 export function codeTargetFromProtyle(protyle: unknown): boolean {
     const el = (protyle as {wysiwyg?: {element?: HTMLElement}} | null)?.wysiwyg?.element;
-    if (!el) {
-        return false;
-    }
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) {
-        return false;
-    }
-    const node = sel.getRangeAt(0).startContainer;
-    const nEl = node.nodeType === 1 ? node as Element : node.parentElement;
-    if (!nEl) {
-        return false;
-    }
-    if (nEl.closest?.(".protyle-wysiwyg") !== el) {
-        return false;
-    }
-    return nEl.closest?.(CODE_TARGET_SELECTOR) !== null;
+    return !!el && selectionInCodeTarget(el);
 }
 
 /** 捕获原生 paste 上下文；不在正文编辑器内或没有剪贴板数据时返回 null。 */
@@ -144,17 +127,4 @@ export function resolvePasteContext(
         codeTarget: snapshot.inCodeTarget,
         hasFiles: snapshot.hasFiles,
     };
-}
-
-/**
- * 时效与指纹校验：快照在窗口期内**且**文本指纹一致才视为本次粘贴的上下文。
- * 若上一次快照未被消费、窗口内又发生另一次粘贴，指纹不匹配的快照会被忽略，
- * 避免吃到旧 context。（安全标志见 resolvePasteContext，两者用途不同。）
- */
-export function consumePasteContext(
-    snapshot: PasteContextSnapshot | null,
-    now: number,
-    expected?: {textPlain?: string, textHTML?: string},
-): PasteContextSnapshot | null {
-    return resolvePasteContext(snapshot, now, expected).context;
 }

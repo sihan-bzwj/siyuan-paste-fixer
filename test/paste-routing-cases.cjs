@@ -1,6 +1,6 @@
 // v0.2.3 粘贴路由专项测试（src/paste-context.ts + 路由纯函数）
 // 覆盖审查要求：代码块目标信息贯通（issue #1 结构性漏口）、files 不被吞、
-// 快照时效、公式计数不再误算金额、tokenizeInlineMath 配对可靠性。
+// 快照时效、公式计数不再误算金额、tokenizeMath 行内配对可靠性。
 const path = require("path");
 const esbuild = require("esbuild");
 const { JSDOM } = require("jsdom");
@@ -36,9 +36,9 @@ async function main() {
         bundle: true, format: "cjs", platform: "node",
         outfile: path.join(__dirname, "_paste-context.cjs"), logLevel: "silent",
     });
-    const { tokenizeInlineMath, tokenizeMath } = require("./_fix-latex.cjs");
+    const { tokenizeMath } = require("./_fix-latex.cjs");
     const { detectPasteScenario, countMathFormulas, planPasteHandling } = require("./_scenario.cjs");
-    const { capturePasteContext, consumePasteContext, PASTE_CONTEXT_WINDOW_MS, resolvePasteContext } = require("./_paste-context.cjs");
+    const { capturePasteContext, PASTE_CONTEXT_WINDOW_MS, resolvePasteContext } = require("./_paste-context.cjs");
     const R = String.raw;
 
     const dom = new JSDOM("<!DOCTYPE html><body></body>", {url: "http://localhost/"});
@@ -78,16 +78,16 @@ async function main() {
     console.log("== 2. 快照时效与指纹：窗口期内且文本一致才可用 ==");
     {
         const snap = {time: Date.now() - 50, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "AAA", textHTML: ""};
-        assert(consumePasteContext(snap, Date.now()) === snap, "50ms 前快照可用");
-        assert(consumePasteContext(snap, Date.now(), {textPlain: "AAA"}) === snap, "textPlain 指纹一致可用");
-        assert(consumePasteContext(snap, Date.now(), {textPlain: "BBB"}) === null, "textPlain 指纹不一致忽略（不吃旧 context）");
+        assert(resolvePasteContext(snap, Date.now()).context === snap, "50ms 前快照可用");
+        assert(resolvePasteContext(snap, Date.now(), {textPlain: "AAA"}).context === snap, "textPlain 指纹一致可用");
+        assert(resolvePasteContext(snap, Date.now(), {textPlain: "BBB"}).context === null, "textPlain 指纹不一致忽略（不吃旧 context）");
         const snapHtml = {time: Date.now() - 50, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "AAA", textHTML: "AAA"};
-        assert(consumePasteContext(snapHtml, Date.now(), {textHTML: "BBB"}) === null, "textHTML 指纹不一致忽略");
+        assert(resolvePasteContext(snapHtml, Date.now(), {textHTML: "BBB"}).context === null, "textHTML 指纹不一致忽略");
         const emptyPlain = {...snap, textPlain: ""};
-        assert(consumePasteContext(emptyPlain, Date.now(), {textPlain: "BBB"}) === emptyPlain, "快照侧为空文本时不做指纹比较（仍可用）");
+        assert(resolvePasteContext(emptyPlain, Date.now(), {textPlain: "BBB"}).context === emptyPlain, "快照侧为空文本时不做指纹比较（仍可用）");
         const old = {time: Date.now() - PASTE_CONTEXT_WINDOW_MS - 100, inCodeTarget: false, protyleElement: null, hasFiles: false, textPlain: "", textHTML: ""};
-        assert(consumePasteContext(old, Date.now()) === null, "超过观察窗的快照忽略");
-        assert(consumePasteContext(null, Date.now()) === null, "无快照返回 null");
+        assert(resolvePasteContext(old, Date.now()).context === null, "超过观察窗的快照忽略");
+        assert(resolvePasteContext(null, Date.now()).context === null, "无快照返回 null");
     }
 
     console.log("== 2a. 安全标志与指纹解耦：CRLF→LF / HTML sanitize 不丢 inCodeTarget ==");
@@ -99,7 +99,6 @@ async function main() {
         assert(res.codeTarget === true, "安全标志 inCodeTarget 仍可信（代码块保护不失效）", JSON.stringify(res));
         const resPlain = resolvePasteContext(snap, Date.now(), {textPlain: "x\ny"});
         assert(resPlain.context === snap, "CRLF→LF 归一化后指纹匹配，内容上下文可用", JSON.stringify(resPlain));
-        assert(consumePasteContext(snap, Date.now(), {textPlain: "x\ny"}) === snap, "consume 同样归一（consume 语义与 resolve 一致）");
         const snapFiles = {...snap, inCodeTarget: false, hasFiles: true};
         const res2 = resolvePasteContext(snapFiles, Date.now(), {textPlain: "其他内容"});
         assert(res2.codeTarget === false && res2.hasFiles === true, "hasFiles 安全标志同样保留", JSON.stringify(res2));
@@ -214,19 +213,20 @@ async function main() {
         assert(uOff.action === "pass" && uOff.hint === false, "未定界 off → 静默放行");
     }
 
-    console.log("== 5. tokenizeInlineMath：正文/公式/金额边界 ==");
+    console.log("== 5. tokenizeMath 行内配对：正文/公式/金额边界 ==");
     {
-        const t1 = tokenizeInlineMath("A $x$ B $y_i$ C");
-        assert(JSON.stringify(t1.map((t) => [t.math, t.text])) ===
-            JSON.stringify([[false, "A "], [true, "x"], [false, " B "], [true, "y_i"], [false, " C"]]),
+        const t1 = tokenizeMath("A $x$ B $y_i$ C");
+        assert(JSON.stringify(t1.map((t) => [t.kind, t.text])) ===
+            JSON.stringify([["text", "A "], ["inline", "x"], ["text", " B "], ["inline", "y_i"], ["text", " C"]]),
         "全文切分为 文本+公式+文本+公式+文本", JSON.stringify(t1));
-        const t2 = tokenizeInlineMath("费用 $5 到 $10");
-        assert(t2.length === 1 && t2[0].math === false, "金额对不算公式", JSON.stringify(t2));
-        const t3 = tokenizeInlineMath("未闭合 $x+1");
+        const t2 = tokenizeMath("费用 $5 到 $10");
+        assert(t2.length === 1 && t2[0].kind === "text", "金额对不算公式", JSON.stringify(t2));
+        const t3 = tokenizeMath("未闭合 $x+1");
         assert(t3.length === 1 && t3[0].text === "未闭合 $x+1", "未闭合美元按文本保留");
-        const t4 = tokenizeInlineMath("$x$ 与 $$y=Wx$$ 和 $a_i$");
-        assert(t4.filter((t) => t.math).length === 2, "块级 $$ 不参与行内配对（留给块处理）");
-        const t5 = tokenizeInlineMath(String.raw`\$5 转义美元`);
+        const t4 = tokenizeMath("$x$ 与 $$y=Wx$$ 和 $a_i$");
+        assert(t4.filter((t) => t.kind !== "text").length === 3,
+            "2 个行内对 + 1 个块级对各自成 token（块级不并入行内配对）", JSON.stringify(t4));
+        const t5 = tokenizeMath(String.raw`\$5 转义美元`);
         assert(t5.length === 1 && t5[0].text === String.raw`\$5 转义美元`, "转义美元按文本保留");
     }
 

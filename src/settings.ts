@@ -22,7 +22,7 @@ export interface PasteFixerSettings {
     hintsEnabled?: boolean;
 }
 
-export const SETTINGS_PATH = "/data/storage/petal/paste-fixer/data.json";
+const SETTINGS_PATH = "/data/storage/petal/paste-fixer/data.json";
 
 const POLICY_KEYS = ["codePolicy", "aiPolicy", "webPolicy", "mixedPolicy", "undelimitedPolicy"] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];

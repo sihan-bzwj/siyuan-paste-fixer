@@ -26,7 +26,7 @@ import {applyMathRepairs, collectMathRepairs, collectPasteTargetBlocks} from "./
 /** 兜底修复的重试时间表（ms）：等思源把粘贴内容和公式渲染落地，命中即停。 */
 const POST_PASTE_REPAIR_DELAYS = [0, 200, 500, 1000, 2000];
 
-/** 场景 → 策略设置键（提示一键切换共用；固定放行场景无策略键不参与切换）。 */
+/** 场景 → 策略设置键（提示一键切换/策略读取共用；固定放行场景无策略键不参与切换）。 */
 const POLICY_KEY_OF_SCENARIO: Partial<Record<PasteScenario, PolicyKey>> = {
     "code-content": "codePolicy",
     "ai-latex": "aiPolicy",
@@ -34,6 +34,15 @@ const POLICY_KEY_OF_SCENARIO: Partial<Record<PasteScenario, PolicyKey>> = {
     "mixed": "mixedPolicy",
     "undelimited-latex": "undelimitedPolicy",
 };
+
+/** 顶栏快关菜单项：场景 + 文案键 + 非智能档目标（代码内容无保守档，直接到关闭）。 */
+const QUICK_TOGGLES: Array<{scenario: PasteScenario, labelKey: string, offValue: "conservative" | "off"}> = [
+    {scenario: "code-content", labelKey: "quickCode", offValue: "off"},
+    {scenario: "ai-latex", labelKey: "quickAI", offValue: "conservative"},
+    {scenario: "web-math", labelKey: "quickWeb", offValue: "conservative"},
+    {scenario: "mixed", labelKey: "quickMixed", offValue: "conservative"},
+    {scenario: "undelimited-latex", labelKey: "quickUndelimited", offValue: "conservative"},
+];
 
 type PasteDetail = IEventBusMap["paste"];
 
@@ -137,8 +146,7 @@ export default class PasteFixer extends Plugin {
                         // 生成失败走纯文本
                     }
                     if (sy) {
-                        this.maybeHint(scenario, countMathFormulas(plain));
-                        resolve({textHTML: "", textPlain: plain, siyuanHTML: sy, files});
+                        this.resolveMarkdown(scenario, plain, sy, resolve, files);
                         return;
                     }
                 }
@@ -156,8 +164,7 @@ export default class PasteFixer extends Plugin {
             const protectedForCheck = maskProtectedSegments(fixed);
             const needsDollarShield = maskLuteUnsafeDollars(protectedForCheck.masked).count > 0;
             if ((!richHTML || hasMathML(textHTML)) && !needsDollarShield) {
-                this.maybeHint(scenario, countMathFormulas(fixed));
-                resolve({textHTML: "", textPlain: fixed, siyuanHTML: "", files});
+                this.resolveMarkdown(scenario, fixed, "", resolve, files);
                 return;
             }
             // 轻量富文本（加粗/斜体等）但无 MathML：修复后的 Markdown 交给内核转 DOM
@@ -167,8 +174,7 @@ export default class PasteFixer extends Plugin {
                 try {
                     const sy = mdToSiyuanHTML(fixed, lute);
                     if (sy) {
-                        this.maybeHint(scenario, countMathFormulas(fixed));
-                        resolve({textHTML: "", textPlain: fixed, siyuanHTML: sy, files});
+                        this.resolveMarkdown(scenario, fixed, sy, resolve, files);
                         return;
                     }
                 } catch (e) {
@@ -180,6 +186,18 @@ export default class PasteFixer extends Plugin {
         }
         resolve(detail);
     };
+
+    /** 修复管线收尾：提示（按落盘文本计公式数）后以"纯 Markdown 载荷"放行。 */
+    private resolveMarkdown(
+        scenario: PasteScenario,
+        markdown: string,
+        sy: string,
+        resolve: (value: unknown) => void,
+        files: PasteDetail["files"],
+    ): void {
+        this.maybeHint(scenario, countMathFormulas(markdown));
+        resolve({textHTML: "", textPlain: markdown, siyuanHTML: sy, files});
+    }
 
     /** 原生 paste：只捕获只读上下文快照，绝不拦截/修改/重派发 */
     private onDomPaste = (event: ClipboardEvent) => {
@@ -258,17 +276,10 @@ export default class PasteFixer extends Plugin {
         this.repairScheduled = false;
     };
 
-    /** 场景 → 生效策略（设置可覆盖默认值） */
+    /** 场景 → 生效策略（设置可覆盖默认值；映射统一走 POLICY_KEY_OF_SCENARIO） */
     private scenarioPolicy(scenario: PasteScenario): ScenarioPolicy {
-        const s = this.settings as unknown as Record<string, ScenarioPolicy>;
-        switch (scenario) {
-            case "code-content": return policyOf(s, "codePolicy");
-            case "ai-latex": return policyOf(s, "aiPolicy");
-            case "web-math": return policyOf(s, "webPolicy");
-            case "mixed": return policyOf(s, "mixedPolicy");
-            case "undelimited-latex": return policyOf(s, "undelimitedPolicy");
-            default: return DEFAULT_POLICY[scenario];
-        }
+        const key = POLICY_KEY_OF_SCENARIO[scenario];
+        return key ? policyOf(this.settings, key) : DEFAULT_POLICY[scenario];
     }
 
     /** 提示去重：事件总线与快照路径各提示一次，1s 内只提示一次 */
@@ -404,28 +415,21 @@ export default class PasteFixer extends Plugin {
             const rect = btn ? btn.getBoundingClientRect() : null;
             const menu = new Menu("paste-fixer-quick", () => {});
             // 三档口径：智能（自动处理）↔ 保守（仅提示）；代码内容 智能（识别+提示）↔ 关闭（静默）
-            const toggle = (
-                key: PolicyKey,
-                scenario: PasteScenario,
-                label: string,
-                toggledValue: "conservative" | "off",
-            ): void => {
-                const on = this.scenarioPolicy(scenario) === "smart";
+            for (const t of QUICK_TOGGLES) {
+                const on = this.scenarioPolicy(t.scenario) === "smart";
                 menu.addItem({
                     icon: on ? "iconSelect" : "iconClose",
-                    label,
+                    label: this.i18n[t.labelKey],
                     click: () => {
-                        (this.settings as unknown as Record<string, unknown>)[key] = on ? "smart" : toggledValue;
-                        void saveSettingsToFile(this.settings);
+                        const key = POLICY_KEY_OF_SCENARIO[t.scenario];
+                        if (key) {
+                            (this.settings as unknown as Record<string, unknown>)[key] = on ? "smart" : t.offValue;
+                            void saveSettingsToFile(this.settings);
+                        }
                         setTimeout(() => this.showQuickMenu(), 60);
                     },
                 });
-            };
-            toggle("codePolicy", "code-content", this.i18n.quickCode, "off");
-            toggle("aiPolicy", "ai-latex", this.i18n.quickAI, "conservative");
-            toggle("webPolicy", "web-math", this.i18n.quickWeb, "conservative");
-            toggle("mixedPolicy", "mixed", this.i18n.quickMixed, "conservative");
-            toggle("undelimitedPolicy", "undelimited-latex", this.i18n.quickUndelimited, "conservative");
+            }
             const hintsOn = this.settings.hintsEnabled !== false;
             menu.addItem({
                 icon: hintsOn ? "iconSelect" : "iconClose",

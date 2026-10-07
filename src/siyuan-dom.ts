@@ -27,6 +27,14 @@ export interface ILiteLute {
     SetInlineUnderscore: (b: boolean) => void;
 }
 
+/** Node → Element 提取：元素节点用自身，文本节点回退父元素（null 安全）。 */
+export function elementOf(node: Node | null): Element | null {
+    if (!node) {
+        return null;
+    }
+    return node.nodeType === 1 ? node as Element : node.parentElement;
+}
+
 /** 自建全局 Lute 实例（window.Lute.New()），与编辑器共享的语法开关保持一致 */
 let cachedLute: ILiteLute | null = null;
 export function getLute(): ILiteLute | null {

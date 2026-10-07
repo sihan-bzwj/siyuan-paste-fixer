@@ -13,6 +13,7 @@
  */
 import {fixLatexText} from "./fix-latex";
 import {applyWholeBlock, extractSourceMarkdown} from "./manual-action";
+import {elementOf} from "./siyuan-dom";
 
 export const MATH_NODE_SELECTOR = '[data-type="inline-math"], [data-type="NodeMathBlock"]';
 
@@ -174,8 +175,7 @@ function caretBlockId(editor: Element): string | null {
     if (!sel || sel.rangeCount === 0) {
         return null;
     }
-    const node = sel.getRangeAt(0).startContainer;
-    const el = node.nodeType === 1 ? node as Element : node.parentElement;
+    const el = elementOf(sel.getRangeAt(0).startContainer);
     const block = el?.closest?.("[data-node-id]") ?? null;
     return block && editor.contains(block) ? block.getAttribute("data-node-id") : null;
 }

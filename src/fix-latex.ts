@@ -82,6 +82,15 @@ function createPlaceholderCodec(input: string): {
 /** 强数学特征：单个 LaTeX 命令即可判定（用于单行 [ ... ] 块） */
 const STRONG_TOKEN_RE = /\\(?:frac|dfrac|sum|int|prod|sqrt|mathbb|left|right|text|begin|end|boxed|underbrace|overbrace|otimes|times|partial|nabla|to|rightarrow|Rightarrow|approx|cdot|cdots|vdots|ddots|top|quad|qquad|displaystyle)/;
 
+/** 中文/全角字符（CJK 统一表意 + CJK 符号标点 + 全角形式）：出现即视为正文语境（manual-action 共用）。 */
+export const CJK_FULLWIDTH_RE = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/;
+
+/** 环境/盒子命令头：像数学的强信号之一（looksLikeMath/isReliableDollarPair 共用）。 */
+const ENV_HEADED_RE = /\\begin\{|\\boxed\{|\\underbrace\{|\\overbrace\{/;
+
+/** 数学信号片段：LaTeX 命令或上下标/关系运算符等字符（可靠公式对的内容判据之一）。 */
+const MATH_SIGNAL_RE = /\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]/;
+
 /** 数学信号（粘贴拦截和右键菜单显示判断共用；含 Markdown 转义形态） */
 const MATH_SIGNALS_RE = /\$\$|\\\[|\\\]|\\\(|\\\)|\\begin\{|\\boxed\{|\\underbrace\{|\\frac\{|<math[\s>]|\\\\[a-zA-Z]|\\[_=^]/i;
 
@@ -209,7 +218,7 @@ function fixInsideMath(content: string): string {
 
 /** 收拢后像数学才允许 trim：非空、不含中文/全角、单 token 或含数学符号。 */
 function looksLikeInlineTrimCore(core: string): boolean {
-    return !!core && !/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core) &&
+    return !!core && !CJK_FULLWIDTH_RE.test(core) &&
         (!/\s/.test(core) || /\\[a-zA-Z]|[_^=]/.test(core));
 }
 
@@ -258,10 +267,10 @@ function looksLikeLatexBlock(content: string): boolean {
         return false;
     }
     // 中文/全角内容只有带 LaTeX 命令时才可能是公式（[步骤1=初始化] 是文本）
-    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(content) && !/\\[a-zA-Z]/.test(content)) {
+    if (CJK_FULLWIDTH_RE.test(content) && !/\\[a-zA-Z]/.test(content)) {
         return false;
     }
-    if (/\\begin\{|\\boxed\{|\\underbrace\{|\\overbrace\{/.test(content)) {
+    if (ENV_HEADED_RE.test(content)) {
         return true;
     }
     if (content.includes("\\")) {
@@ -332,7 +341,7 @@ function convertBareBlocks(text: string, hold: (math: string) => string): string
         const looksMath = looksLikeLatexBlock(content);
         const multiline = content.includes("\n");
         const strongSingle = !content.includes("\\") || STRONG_TOKEN_RE.test(content) ||
-            /\\begin\{|\\boxed\{|\\underbrace\{|\\overbrace\{/.test(content);
+            ENV_HEADED_RE.test(content);
         if (looksMath && (multiline || strongSingle) && after !== "(" && after !== "[") {
             // 去掉独占一行的 # 标题残留：# [公式] 中的 # 是渲染伪影
             let prefix = text.slice(pos, start);
@@ -426,7 +435,7 @@ function convertBareEnvironments(
 /** `( ... )` 内容像数学（含 LaTeX 命令或下标/上标）才转换 */
 function looksLikeParenMath(content: string): boolean {
     if (content.includes("\n") || content.includes("://") ||
-        /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(content)) {
+        CJK_FULLWIDTH_RE.test(content)) {
         return false; // 跨行、URL、含中文/全角符号 → 是普通括号文本
     }
     // （"url", x_i）这类带引号的代码元组不是数学；\text{"..."} 含命令则放行
@@ -842,19 +851,13 @@ function isEscapedDollar(text: string, index: number): boolean {
  */
 function isReliableDollarPair(content: string): boolean {
     const core = content.trim();
-    if (!core || /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core)) {
+    if (!core || CJK_FULLWIDTH_RE.test(core)) {
         return false;
     }
-    if (/\s/.test(core) && !/\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]/.test(core)) {
+    if (/\s/.test(core) && !MATH_SIGNAL_RE.test(core)) {
         return false;
     }
-    return /\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]|^[A-Za-z0-9.(),-]+$/.test(core);
-}
-
-export interface InlineMathToken {
-    /** true=数学对（$...$ 且内容可靠），text 为不含定界符的公式本体；false=普通文本 */
-    math: boolean;
-    text: string;
+    return MATH_SIGNAL_RE.test(core) || /^[A-Za-z0-9.(),-]+$/.test(core);
 }
 
 export interface DollarMathMatch {
@@ -897,10 +900,10 @@ function isReliableMultilineDollar(content: string): boolean {
     if (lines.length > 16 || !lines.every((l) => l.trim())) {
         return false;
     }
-    if (/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(core)) {
+    if (CJK_FULLWIDTH_RE.test(core)) {
         return false;
     }
-    return lines.some((l) => /\\[A-Za-z]+|[_^=+*/<>≤≥×÷∞α-ωΑ-Ω]/.test(l));
+    return lines.some((l) => MATH_SIGNAL_RE.test(l));
 }
 
 /**
@@ -999,32 +1002,6 @@ export function tokenizeMath(markdown: string, options: ScanDollarOptions = {}):
     }
     if (pos < markdown.length) {
         out.push({kind: "text", text: markdown.slice(pos)});
-    }
-    return out;
-}
-
-/**
- * 行内 token 兼容导出（旧 {math,text} 格式；块级 $$ 保持并入文本段，
- * 与历史行为一致，供公式计数等调用方使用）。
- */
-export function tokenizeInlineMath(markdown: string): InlineMathToken[] {
-    const out: InlineMathToken[] = [];
-    let buf = "";
-    for (const t of tokenizeMath(markdown, {multiline: false})) {
-        if (t.kind === "text") {
-            buf += t.text;
-        } else if (t.kind === "block") {
-            buf += "$$" + t.text + "$$";
-        } else {
-            if (buf) {
-                out.push({math: false, text: buf});
-                buf = "";
-            }
-            out.push({math: true, text: t.text});
-        }
-    }
-    if (buf) {
-        out.push({math: false, text: buf});
     }
     return out;
 }

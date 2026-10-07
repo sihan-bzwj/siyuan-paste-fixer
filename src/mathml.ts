@@ -106,6 +106,15 @@ function htmlToText(root: Node): string {
         .trim();
 }
 
+/** TeX → 定界符文本：行内 $...$；块级 $$\n...\n$$（padded=块级前后再补空行，防与邻接文本粘连）。 */
+function wrapMath(tex: string, isDisplay: boolean, padded = false): string {
+    if (!isDisplay) {
+        return "$" + tex + "$";
+    }
+    const block = "$$\n" + tex + "\n$$";
+    return padded ? "\n" + block + "\n" : block;
+}
+
 export function convertMathMLInHTML(html: string): MathMLResult {
     const doc = new DOMParser().parseFromString(html, "text/html");
     let count = 0;
@@ -126,7 +135,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
         }
         const isDisplay = container.getAttribute("display") === "true" ||
             /\\begin\{equation|\\\[/.test(tex);
-        container.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex.trim() + "\n$$" : "$" + tex.trim() + "$"));
+        container.replaceWith(doc.createTextNode(wrapMath(tex.trim(), isDisplay)));
         record("data-latex");
     });
 
@@ -154,7 +163,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             ann.closest("mjx-container")?.getAttribute("display") === "true" ||
             mathEl?.getAttribute("display") === "block" ||
             !!wikipediaRoot?.classList.contains("mwe-math-element-block");
-        target.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
+        target.replaceWith(doc.createTextNode(wrapMath(tex, isDisplay)));
         record("annotation");
     });
 
@@ -169,7 +178,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             return;
         }
         const isDisplay = /display/.test(type);
-        s.replaceWith(doc.createTextNode(isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
+        s.replaceWith(doc.createTextNode(wrapMath(tex, isDisplay)));
         record("mathjax-v2");
     });
 
@@ -189,8 +198,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             if (tex) {
                 const isDisplay = mml.getAttribute("display") === "block" ||
                     !!wikipediaRoot?.classList.contains("mwe-math-element-block");
-                (wikipediaRoot || mml).replaceWith(doc.createTextNode(
-                    isDisplay ? "$$\n" + tex + "\n$$" : "$" + tex + "$"));
+                (wikipediaRoot || mml).replaceWith(doc.createTextNode(wrapMath(tex, isDisplay)));
                 record("alttext");
                 return;
             }
@@ -203,7 +211,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
             const container = (mml.closest("mjx-container") || wikipediaRoot || mml) as HTMLElement;
             const isDisplay = mml.getAttribute("display") === "block" ||
                 container.getAttribute("display") === "true";
-            const wrapped = isDisplay ? "\n$$\n" + latex.trim() + "\n$$\n" : "$" + latex.trim() + "$";
+            const wrapped = wrapMath(latex.trim(), isDisplay, true);
             container.replaceWith(doc.createTextNode(wrapped));
             record("mathml");
         } catch (e) {
