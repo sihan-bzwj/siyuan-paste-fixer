@@ -849,9 +849,31 @@ function isEscapedDollar(text: string, index: number): boolean {
  * 一旦被误配，Lute 会把很长一段正文吞进 KaTeX；单个变量、数字、LaTeX 命令
  * 以及带常见运算符的表达式则可以安全视为公式。
  */
+/**
+ * 中文正文不能被美元吞进公式，但 \text{中文} 是合法的数学标签。
+ * 只忽略完整文本命令的花括号参数；未闭合的参数或参数外的中文仍按正文保护。
+ */
+function containsProseCJK(content: string): boolean {
+    const textCommand = /\\(?:text|textbf|textit|textrm|textsf|texttt|operatorname)\s*\{/g;
+    let visible = "", position = 0;
+    for (let match = textCommand.exec(content); match; match = textCommand.exec(content)) {
+        let depth = 1, end = textCommand.lastIndex;
+        for (; end < content.length && depth > 0; end++) {
+            if (content[end] === "\\") { end++; continue; }
+            if (content[end] === "{") depth++;
+            if (content[end] === "}") depth--;
+        }
+        if (depth !== 0) break;
+        visible += content.slice(position, match.index);
+        position = end;
+        textCommand.lastIndex = end;
+    }
+    return CJK_FULLWIDTH_RE.test(visible + content.slice(position));
+}
+
 function isReliableDollarPair(content: string): boolean {
     const core = content.trim();
-    if (!core || CJK_FULLWIDTH_RE.test(core)) {
+    if (!core || containsProseCJK(core)) {
         return false;
     }
     if (/\s/.test(core) && !MATH_SIGNAL_RE.test(core)) {
@@ -900,7 +922,7 @@ function isReliableMultilineDollar(content: string): boolean {
     if (lines.length > 16 || !lines.every((l) => l.trim())) {
         return false;
     }
-    if (CJK_FULLWIDTH_RE.test(core)) {
+    if (containsProseCJK(core)) {
         return false;
     }
     return lines.some((l) => MATH_SIGNAL_RE.test(l));

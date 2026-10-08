@@ -21,10 +21,7 @@ import {createSettingsPanel, loadSettingsFromFile, PasteFixerSettings, policyOf,
 import {capturePasteContext, codeTargetFromProtyle, PasteContextSnapshot, resolvePasteContext} from "./paste-context";
 import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
 import {convertUndelimitedLatex} from "./undelimited";
-import {applyMathRepairs, collectMathRepairs, collectPasteTargetBlocks} from "./post-paste-repair";
-
-/** 兜底修复的重试时间表（ms）：等思源把粘贴内容和公式渲染落地，命中即停。 */
-const POST_PASTE_REPAIR_DELAYS = [0, 200, 500, 1000, 2000];
+import {capturePostPasteScope, PostPasteRepairTask, PostPasteScope} from "./post-paste-task";
 
 /** 场景 → 策略设置键（提示一键切换/策略读取共用；固定放行场景无策略键不参与切换）。 */
 const POLICY_KEY_OF_SCENARIO: Partial<Record<PasteScenario, PolicyKey>> = {
@@ -67,6 +64,12 @@ export default class PasteFixer extends Plugin {
     private lastEditorRange: Range | null = null;
     /** 插件已卸载：异步 bootstrap 中途卸载时不再注册任何监听器 */
     private disposed = false;
+    /** 原生粘贴的块快照只供同一次官方事件使用，不在捕获阶段安排写回。 */
+    private pasteScope: PostPasteScope | null = null;
+    private readonly postPasteTask = new PostPasteRepairTask(
+        scenario => !this.disposed && ["smart", "fix"].includes(this.scenarioPolicy(scenario)),
+        count => showMessage(this.i18n.hintPasteRepair.replace("{n}", String(count)), 4000),
+    );
 
     /** 编辑器内选区变更：记录最近有效 range（供顶栏/命令使用） */
     private onSelectionChange = (): void => {
@@ -87,7 +90,14 @@ export default class PasteFixer extends Plugin {
     /** 事件总线 paste：唯一转换入口 */
     private onPaste = (event: CustomEvent<PasteDetail>) => {
         const detail = event.detail;
-        const resolve = detail.resolve as unknown as (value: unknown) => void;
+        const resolve = (value: unknown): void => {
+            // 思源 3.8.6 在事件未取消时立即采用原载荷；resolve 的结果在微任务中
+            // 处理。只有真正替换载荷才取消“官方插件事件”，让宿主等待结果。
+            // 这里不取消原生 ClipboardEvent，附件/内部复制仍走宿主默认路径。
+            if (value !== detail) event.preventDefault();
+            (detail.resolve as unknown as (result: unknown) => void)(value);
+        };
+        if (this.disposed) { resolve(detail); return; }
         try {
             const textHTML = detail.textHTML || "";
             const textPlain = detail.textPlain || "";
@@ -99,7 +109,9 @@ export default class PasteFixer extends Plugin {
             // HTML sanitize），严格指纹匹配会误丢 inCodeTarget 导致代码保护失效；
             // 再以 EventBus 自带 detail.protyle 实时判定互为备份
             const snapRes = resolvePasteContext(this.pasteSnapshot, Date.now(), {textPlain, textHTML});
+            const scope = this.pasteScope;
             this.pasteSnapshot = null;
+            this.pasteScope = null;
             const inCodeTarget = snapRes.codeTarget || codeTargetFromProtyle(detail.protyle);
 
             // 统一决策（顺序契约：附件 → 场景 pass → 复杂富文本 → 修复管线；
@@ -112,6 +124,12 @@ export default class PasteFixer extends Plugin {
                 hasFiles: snapRes.hasFiles || (!!files && files.length > 0),
                 getPolicy: (s) => this.scenarioPolicy(s),
             });
+            // 自动修复授权必须来自同一次官方决策。复杂富文本可以仅修坏公式，
+            // 但关闭/保守/代码/附件/内部复制都不能借异步兜底绕过放行策略。
+            if (handling.plan.action === "fix" && (handling.kind === "fix" || handling.reason === "rich") &&
+                snapRes.context && scope && scope.editor === snapRes.context.protyleElement) {
+                this.postPasteTask.start(scope, handling.plan.scenario);
+            }
             if (handling.kind === "passthrough") {
                 if (handling.reason === "rich") {
                     this.maybeHintRich();
@@ -130,7 +148,8 @@ export default class PasteFixer extends Plugin {
                 // web-math）——转换成功就直接采用，不让 HTML 来源裁决兜圈子
                 const converted = convertUndelimitedLatex(textPlain);
                 if (converted !== textPlain) {
-                    decision = {markdown: converted, source: "plain", htmlQuality: "none", sourceKinds: []};
+                    // 与既有修复入口统一格式，数字开头公式也获得 Lute 兼容包裹。
+                    decision = {markdown: fixLatexText(converted), source: "plain", htmlQuality: "none", sourceKinds: []};
                 }
             }
             if (!decision) {
@@ -208,76 +227,13 @@ export default class PasteFixer extends Plugin {
         try {
             const snapshot = capturePasteContext(event);
             if (snapshot) {
+                this.postPasteTask.cancel();
                 this.pasteSnapshot = snapshot;
-                this.schedulePostPasteRepair(snapshot);
+                this.pasteScope = snapshot.protyleElement ? capturePostPasteScope(snapshot.protyleElement) : null;
             }
         } catch (e) {
             /* 快照失败不影响粘贴 */
         }
-    };
-
-    /** 粘贴前该编辑器的块 id 快照（兜底修复的范围依据；null = 没抓到，只认光标块） */
-    private prePasteBlocks: {editor: HTMLElement, ids: Set<string>} | null = null;
-
-    /** 兜底修复是否有在跑的定时任务（同一时刻只留一条链） */
-    private repairScheduled = false;
-
-    /**
-     * 粘贴后兜底：富文本粘贴走"原样放行"分支时，破损公式仍会留在文档里渲染报错。
-     * 这里异步补一次"只修公式内容"的兜底（详见 post-paste-repair.ts）：
-     * 代码块/附件粘贴不介入，范围只限本次新块 + 光标块。
-     */
-    private schedulePostPasteRepair(snapshot: PasteContextSnapshot): void {
-        const editor = snapshot.protyleElement;
-        if (!editor) {
-            return;
-        }
-        this.prePasteBlocks = {
-            editor,
-            ids: new Set(
-                Array.from(editor.querySelectorAll("[data-node-id]"))
-                    .map((el) => el.getAttribute("data-node-id") || "")
-                    .filter(Boolean),
-            ),
-        };
-        if (snapshot.inCodeTarget || snapshot.hasFiles || this.repairScheduled) {
-            return;
-        }
-        this.repairScheduled = true;
-        window.setTimeout(() => void this.runPostPasteRepair(0), POST_PASTE_REPAIR_DELAYS[0]);
-    }
-
-    /** 等思源把粘贴内容与公式渲染落地（最多 3 轮），只动渲染失败的公式节点。 */
-    private runPostPasteRepair = async (attempt: number): Promise<void> => {
-        const retry = (): void => {
-            if (attempt + 1 < POST_PASTE_REPAIR_DELAYS.length) {
-                window.setTimeout(() => void this.runPostPasteRepair(attempt + 1), POST_PASTE_REPAIR_DELAYS[attempt + 1]);
-            } else {
-                this.repairScheduled = false;
-            }
-        };
-        const snap = this.prePasteBlocks;
-        if (!snap || !snap.editor.isConnected) {
-            this.repairScheduled = false;
-            return;
-        }
-        try {
-            const candidates = collectMathRepairs(
-                collectPasteTargetBlocks(snap.editor, snap.ids),
-                fixLatexText,
-            );
-            if (candidates.length === 0) {
-                retry();
-                return;
-            }
-            const fixed = await applyMathRepairs(candidates);
-            if (fixed > 0) {
-                showMessage(this.i18n.hintPasteRepair.replace("{n}", String(fixed)), 4000);
-            }
-        } catch (e) {
-            console.error("[paste-fixer] 粘贴后兜底修复失败", e);
-        }
-        this.repairScheduled = false;
     };
 
     /** 场景 → 生效策略（设置可覆盖默认值；映射统一走 POLICY_KEY_OF_SCENARIO） */
@@ -556,6 +512,9 @@ export default class PasteFixer extends Plugin {
 
     onunload() {
         this.disposed = true;
+        this.postPasteTask.cancel();
+        this.pasteSnapshot = null;
+        this.pasteScope = null;
         document.removeEventListener("paste", this.onDomPaste as EventListener, true);
         document.removeEventListener("selectionchange", this.onSelectionChange);
         if (this.menuHandlers) {

@@ -146,6 +146,33 @@ async function main() {
     assert(JSON.stringify(targets) === JSON.stringify(["b1", "b3"]), "只挑新块（b2 已存在→不动）", JSON.stringify(targets));
     assert(R.collectPasteTargetBlocks(other, null).length === 0, "没有粘贴前快照时只认光标块（这里无光标→空）");
 
+    console.log("== 8. 写回中途取消：停止后续块，尚未写入的 DOM 保持原文 ==");
+    const guarded = document.createElement("div");
+    guarded.innerHTML = paragraph("guard1", inlineMath("a\\qquadb", true)) + paragraph("guard2", inlineMath("c\\qquadd", true));
+    document.body.appendChild(guarded);
+    let allowed = true;
+    const guardedWrites = [];
+    await R.applyMathRepairs(R.collectMathRepairs(guarded.children), {
+        shouldApply: () => allowed,
+        updateBlock: async (block, markdown) => {
+            guardedWrites.push(block.getAttribute("data-node-id"));
+            // 模拟第一笔请求返回前用户关闭策略/卸载插件。
+            await Promise.resolve();
+            allowed = false;
+        },
+    });
+    assert(JSON.stringify(guardedWrites) === JSON.stringify(["guard1"]), "取消后第二块不发请求", JSON.stringify(guardedWrites));
+    assert(guarded.querySelector('[data-node-id="guard2"] [data-type="inline-math"]').getAttribute("data-content") === "c\\qquadd", "未处理的第二块保持原始公式内容");
+    allowed = true;
+    const second = guarded.querySelector('[data-node-id="guard2"]');
+    await R.applyMathRepairs(R.collectMathRepairs([second]), {
+        shouldApply: () => allowed,
+        serializeBlock: block => { allowed = false; return R.serializeBlockMarkdown(block); },
+        updateBlock: async () => { guardedWrites.push("unexpected"); },
+    });
+    assert(!guardedWrites.includes("unexpected"), "序列化后策略改变也不发请求");
+    assert(second.querySelector('[data-type="inline-math"]').getAttribute("data-content") === "c\\qquadd", "取消时回滚序列化用的临时 DOM 内容");
+
     console.log("");
     console.log("粘贴后兜底修复测试: " + passed + " 通过, " + failed + " 失败");
     process.exit(failed === 0 ? 0 : 1);

@@ -111,6 +111,8 @@ export function serializeBlockMarkdown(block: HTMLElement): string | null {
 export interface MathRepairDeps {
     serializeBlock?: (block: HTMLElement) => string | null;
     updateBlock?: (block: HTMLElement, markdown: string) => Promise<void>;
+    /** 调用方的实时策略/生命周期检查；每个块写入前都要通过。 */
+    shouldApply?: () => boolean;
 }
 
 /**
@@ -146,6 +148,7 @@ export async function applyMathRepairs(
     };
     let fixed = 0;
     for (const [block, list] of byBlock) {
+        if (deps.shouldApply && !deps.shouldApply()) break;
         for (const c of list) {
             c.el.setAttribute("data-content", c.to);
         }
@@ -158,6 +161,10 @@ export async function applyMathRepairs(
         if (markdown === null) {
             rollback(list);
             continue;
+        }
+        if (deps.shouldApply && !deps.shouldApply()) {
+            rollback(list);
+            break;
         }
         try {
             await update(block, markdown);
@@ -187,8 +194,10 @@ function caretBlockId(editor: Element): string | null {
 export function collectPasteTargetBlocks(
     editor: Element,
     knownIds: Set<string> | null,
+    /** 传入时固定本次粘贴的光标块；未传时保留原有手动调用行为。 */
+    targetBlockId?: string | null,
 ): HTMLElement[] {
-    const caretId = caretBlockId(editor);
+    const caretId = targetBlockId === undefined ? caretBlockId(editor) : targetBlockId;
     const out: HTMLElement[] = [];
     for (const el of Array.from(editor.querySelectorAll("[data-node-id]"))) {
         const id = el.getAttribute("data-node-id") || "";

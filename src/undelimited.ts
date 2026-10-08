@@ -1,10 +1,10 @@
 /**
- * 未定界 LaTeX 行级识别（v0.2.9，opt-in）。
+ * 未定界 LaTeX 行级识别（智能策略自动转换，保守/关闭策略原样放行）。
  *
  * 场景：AI 聊天复制的纯文本把定界符全丢——`\lor`、`\land`、`\neg`、
  * `\sum m(1, 3, 5)` 等裸 LaTeX 命令散布在中文正文里，无任何 $ / \( / $$ 定界。
- * 此类文本默认判 plain-prose 原样放行；用户在设置中把「未定界 LaTeX 策略」
- * 改为「始终修复公式」后，才走这里的行级片段包裹。
+ * 具有至少两个强数学信号时归入未定界场景；智能策略按片段包裹公式，
+ * 代码、链接、完整标识符和已定界公式均保留原文。
  *
  * 判定与切分全部基于 v0.2.7 的 KaTeX 已知命令表（LATEX_COMMANDS，1149 项）：
  * - 强 token：已知命令、`^`、`_`（紧跟操作数）；
@@ -15,10 +15,73 @@
  * - CJK/全角/未知命令一律终止片段（保守）。
  */
 
-import {splitMarkdownSegments} from "./fix-latex";
+import {scanDollarMath, splitMarkdownSegments} from "./fix-latex";
 import {LATEX_COMMANDS} from "./latex-commands";
 
 const MATH_PUNCT = "=+-*/<>,.;:!?'`|~&";
+
+/** 常见带参数命令必须连参数一起识别，不能只把命令名包成公式。 */
+const REQUIRED_ARGUMENTS: Record<string, number> = {
+    frac: 2, dfrac: 2, tfrac: 2, cfrac: 2, binom: 2, dbinom: 2, tbinom: 2,
+    sqrt: 1, text: 1, textbf: 1, textit: 1, textrm: 1, operatorname: 1,
+    mathbb: 1, mathbf: 1, mathrm: 1, mathit: 1, mathcal: 1, mathscr: 1,
+    overline: 1, underline: 1, underbrace: 1, overbrace: 1, boxed: 1,
+};
+
+/** 多字母的完整标识符属于正文；整个跳过，禁止从 user_id 的 r 开始识别。 */
+function proseIdentifierLength(text: string, start: number): number {
+    const word = /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*/.exec(text.slice(start));
+    if (!word) return 0;
+    const base = word[0].split("_")[0];
+    return base.length > 1 ? word[0].length : 0;
+}
+
+/**
+ * 只整理 AI 纯文本里的上标标签，代码/链接/已有公式不经过这里。
+ * 正常 x<sup>2</sup> 转成 x^{2}；真实夹具把函数参数、中文正文也塞进
+ * 上标标签时，仅恢复明确的星号上标，并保留剩余文字的顺序。
+ */
+function normalizeSuperscripts(text: string): string {
+    return text.replace(/<sup>([^\n]*?)<\/sup>(\*)?/gi, (raw, inner: string, trailingStar: string | undefined) => {
+        if (inner.startsWith("*")) return "^*" + inner.slice(1) + (trailingStar || "");
+        if (trailingStar && /[\u3000-\u9fff]/.test(inner) && /[A-Za-z]$/.test(inner)) return inner + "^*";
+        if (/^[A-Za-z0-9+\-]+$/.test(inner)) return "^{" + inner + "}" + (trailingStar || "");
+        return raw;
+    });
+}
+
+/** 参数可以是平衡花括号、单个字符或已知命令；缺少/未闭合时整段不转换。 */
+function requiredArgumentsEnd(line: string, start: number, command: string): number | null {
+    const count = REQUIRED_ARGUMENTS[command];
+    if (!count) return start;
+    let j = start;
+    const skipSpaces = (): void => { while (j < line.length && /\s/.test(line[j])) j++; };
+    skipSpaces();
+    if (command === "sqrt" && line[j] === "[") {
+        const close = findBalanced(line, j, "[", "]");
+        if (close < 0) return null;
+        j = close + 1;
+    }
+    for (let argument = 0; argument < count; argument++) {
+        skipSpaces();
+        if (line[j] === "{") {
+            const close = findBalanced(line, j, "{", "}");
+            if (close < 0) return null;
+            j = close + 1;
+        } else if (line[j] === "\\") {
+            const length = matchCommand(line, j);
+            if (length < 0) return null;
+            const nested = requiredArgumentsEnd(line, j + length, line.slice(j + 1, j + length));
+            if (nested === null) return null;
+            j = nested;
+        } else if (j < line.length && /[A-Za-z0-9]/.test(line[j])) {
+            j++;
+        } else {
+            return null;
+        }
+    }
+    return j;
+}
 
 /** `\command`（已知命令）；未知命令返回 null（保守终止）。 */
 function matchCommand(text: string, i: number): number {
@@ -92,7 +155,9 @@ function parseMathFragment(line: string, start: number): {end: number, strong: b
                 break; // 未知命令：保守终止（不吞不转）
             }
             strong = true;
-            j += len;
+            const argumentsEnd = requiredArgumentsEnd(line, j + len, line.slice(j + 1, j + len));
+            if (argumentsEnd === null) return null;
+            j = argumentsEnd;
             lastEnd = j;
             continue;
         }
@@ -108,7 +173,7 @@ function parseMathFragment(line: string, start: number): {end: number, strong: b
             } else if (line[j] === "{") {
                 const close = findBalanced(line, j, "{", "}");
                 if (close < 0) {
-                    break;
+                    return null;
                 }
                 j = close + 1;
             } else if (j < line.length && (/[A-Za-z0-9]/.test(line[j]) || MATH_PUNCT.includes(line[j]))) {
@@ -121,14 +186,16 @@ function parseMathFragment(line: string, start: number): {end: number, strong: b
             continue;
         }
         if (MATH_PUNCT.includes(c)) {
+            // 标签不能变成公式比较符，避免把 A<sup> 拆成 A< 与 p>。
+            if (c === "<" && /^<\/?[A-Za-z][^>]*>/.test(line.slice(j))) break;
             j++;
             lastEnd = j;
             continue;
         }
         if (c === "(" || c === "[" || c === "{") {
-            const close = findBalanced(line, j, c, c === "(" ? ")" : c === "[" ? "}" : "]");
+            const close = findBalanced(line, j, c, c === "(" ? ")" : c === "[" ? "]" : "}");
             if (close < 0) {
-                break;
+                return null;
             }
             // 组内含命令/上下标/反斜杠 → 视为强（如 (\neg P_1)）
             if (/[\\^_]/.test(line.slice(j, close + 1))) {
@@ -186,6 +253,8 @@ export function needsUndelimitedDetection(text: string): boolean {
         const t = segment.text;
         let i = 0;
         while (i < t.length) {
+            const identifierLength = proseIdentifierLength(t, i);
+            if (identifierLength) { i += identifierLength; continue; }
             if (t[i] === "\\") {
                 const len = matchCommand(t, i);
                 if (len > 0) {
@@ -215,8 +284,19 @@ export function needsUndelimitedDetection(text: string): boolean {
  */
 export function convertUndelimitedLatex(text: string): string {
     return splitMarkdownSegments(text)
-        .map((segment) => segment.protected ? segment.text : convertLines(segment.text))
+        .map((segment) => segment.protected ? segment.text : convertNonMath(segment.text))
         .join("");
+}
+
+/** 已有美元定界公式逐字保留，使重复转换幂等，也能安全处理公式与裸命令混排。 */
+function convertNonMath(text: string): string {
+    let out = "", position = 0;
+    for (const math of scanDollarMath(text, {multiline: true})) {
+        out += convertLines(normalizeSuperscripts(text.slice(position, math.start)));
+        out += text.slice(math.start, math.end);
+        position = math.end;
+    }
+    return out + convertLines(normalizeSuperscripts(text.slice(position)));
 }
 
 function convertLines(block: string): string {
@@ -234,6 +314,14 @@ function convertLine(line: string): string {
             i++;
             continue;
         }
+        const identifierLength = proseIdentifierLength(line, i);
+        const tag = /^<\/?[A-Za-z][^>]*>/.exec(line.slice(i));
+        const protectedLength = identifierLength || tag?.[0].length || 0;
+        if (protectedLength) {
+            out += line.slice(i, i + protectedLength);
+            i += protectedLength;
+            continue;
+        }
         const frag = parseMathFragment(line, i);
         if (frag) {
             out += "$" + line.slice(i, frag.end).trim() + "$";
@@ -241,6 +329,8 @@ function convertLine(line: string): string {
             i = frag.end;
             continue;
         }
+        // 不能完整识别的命令保留该行剩余文本，防止从它的参数中间重新起步。
+        if (matchCommand(line, i) > 0) { out += line.slice(i); break; }
         out += line[i];
         i++;
     }
