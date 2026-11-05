@@ -2,30 +2,25 @@
  * MathML → LaTeX：
  * - 原生 MathML（Wikipedia 等网页）：mathml2latex 转换；
  * - MathJax（mjx-container 内含 assistive MathML）：转换后整块替换；
- * - KaTeX（<annotation encoding="application/x-tex"> 内含原始 TeX）：直接取源码。
- * 转换完成后把整个 HTML 提取为带换行的纯文本（公式已是 $...$ / $$...$$ 形式），
- * 供思源走 Markdown 粘贴路径解析成公式块。
+ * - KaTeX（<annotation encoding="application/x-tex"> 内含原始 TeX）：直接取源码；
+ * - Office MathML（Word/WPS/PPT 的 <m:oMath>）：omml.ts 转 LaTeX（v0.3.0）。
+ * 转换完成后 HTML 走 html-to-markdown 变成 Markdown（公式已是 $...$ / $$...$$ 形式），
+ * 网页原有的加粗/链接/图片/列表/表格随之保留，供思源走 Markdown 粘贴路径解析成块。
  */
 
 import mathml2latex from "mathml2latex";
+import {htmlToMarkdown} from "./html-to-markdown";
+import {convertOmmlElement, isOmmlElement} from "./omml";
 
-// 匹配 <math>、<mml:math>、<m:math>（Word 的 <m:oMath> 不算，思源内核自行处理）
+// 匹配 <math>、<mml:math>、<m:math> 与 Word 的 <m:oMath>（v0.3.0 起 OMML 也由本插件转换）
 const MATHML_TAGS = 'math, mml\\:math, m\\:math';
 
 export function hasMathML(html: string): boolean {
     return /<\/?(?:[a-z0-9]+:)?math[\s>]/i.test(html) ||
+        /<(?:[a-z0-9]+:)?oMath[\s>/]/i.test(html) ||
         /class="katex|annotation\s+encoding|mjx-container|class="MathJax/i.test(html) ||
         /<script[^>]*type=["']?math\/(?:tex|latex)/i.test(html);
 }
-
-const BLOCK_TAGS = new Set([
-    "P", "DIV", "LI", "UL", "OL", "H1", "H2", "H3", "H4", "H5", "H6",
-    "TR", "TD", "TH", "TABLE", "PRE", "BLOCKQUOTE", "SECTION", "ARTICLE",
-    "HR", "DL", "DT", "DD", "HEADER", "FOOTER", "MAIN", "ASIDE",
-]);
-const IGNORE_TAGS = new Set([
-    "SCRIPT", "STYLE", "NOSCRIPT", "SVG", "HEAD", "TITLE", "META", "LINK", "TEMPLATE",
-]);
 
 export interface MathMLResult {
     text: string;
@@ -36,7 +31,7 @@ export interface MathMLResult {
     sourceKinds: MathSourceKind[];
 }
 
-export type MathSourceKind = "data-latex" | "annotation" | "mathjax-v2" | "alttext" | "mathml";
+export type MathSourceKind = "data-latex" | "annotation" | "mathjax-v2" | "alttext" | "mathml" | "omml";
 
 /**
  * mathml2latex 输出的已知问题消毒（KaTeX 解析不通过的部分）：
@@ -64,46 +59,6 @@ function stripWikiStyleWrapper(alt: string): string {
         return alt.slice(head[0].length, -1).trim();
     }
     return alt.trim();
-}
-
-function htmlToText(root: Node): string {
-    const parts: string[] = [];
-    const walk = (node: Node): void => {
-        if (node.nodeType === 3) {
-            parts.push(node.nodeValue || "");
-            return;
-        }
-        if (node.nodeType !== 1) {
-            return;
-        }
-        const el = node as HTMLElement;
-        const tag = el.tagName;
-        if (IGNORE_TAGS.has(tag)) {
-            return;
-        }
-        if (tag === "BR") {
-            parts.push("\n");
-            return;
-        }
-        if (tag === "IMG") {
-            parts.push(el.getAttribute("alt") || "");
-            return;
-        }
-        if (BLOCK_TAGS.has(tag)) {
-            parts.push("\n");
-        }
-        el.childNodes.forEach(walk);
-        if (BLOCK_TAGS.has(tag)) {
-            parts.push("\n");
-        }
-    };
-    walk(root);
-    return parts.join("")
-        .replace(/[\u200b-\u200d\ufeff\u2060]/g, "") // 网页 DOM 常见的零宽字符/BOM 残留
-        .replace(/[ \t]+\n/g, "\n")
-        .replace(/\n{3,}/g, "\n\n")
-        .replace(/[ \t]{2,}/g, " ")
-        .trim();
 }
 
 /** TeX → 定界符文本：行内 $...$；块级 $$\n...\n$$（padded=块级前后再补空行，防与邻接文本粘连）。 */
@@ -189,7 +144,7 @@ export function convertMathMLInHTML(html: string): MathMLResult {
         }
         const mml = el as HTMLElement;
         // Wikipedia 同时放置隐藏 MathML 与可见 fallback <img alt="原始 TeX">。
-        // 必须整体替换渲染根节点，否则 htmlToText 会把图片 alt 再提取一遍。
+        // 必须整体替换渲染根节点，否则转 Markdown 时会把图片 alt 再提取一遍。
         const wikipediaRoot = mml.closest(".mwe-math-element") as HTMLElement | null;
         const alt = (mml.getAttribute("alttext") || "").trim();
         if (alt) {
@@ -219,11 +174,29 @@ export function convertMathMLInHTML(html: string): MathMLResult {
         }
     });
 
+    // 5. Office MathML（Word/WPS/PPT）：<m:oMath> 行内、<m:oMathPara> 独立成块
+    Array.from(doc.querySelectorAll("*")).forEach((node) => {
+        const el = node as Element;
+        if (!el.isConnected || !isOmmlElement(el)) {
+            return;
+        }
+        if (el.parentElement && isOmmlElement(el.parentElement)) {
+            return; // 内层 oMath 由外层 oMathPara 统一处理
+        }
+        const tex = convertOmmlElement(el);
+        if (!tex || !tex.trim()) {
+            return;
+        }
+        const isDisplay = /^omathpara$/i.test(el.localName || "");
+        el.replaceWith(doc.createTextNode(wrapMath(tex.trim(), isDisplay, isDisplay)));
+        record("omml");
+    });
+
     if (count === 0) {
         return {text: "", count: 0, quality: "none", sourceKinds: []};
     }
     return {
-        text: htmlToText(doc.body),
+        text: htmlToMarkdown(doc.body),
         count,
         quality: sourceKinds.includes("mathml") ? "derived" : "exact",
         sourceKinds,

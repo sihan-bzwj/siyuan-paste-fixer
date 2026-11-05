@@ -41,6 +41,8 @@ const REQUIRED_KEYS = [
     "quickCode", "quickAI", "quickWeb", "quickMixed", "quickUndelimited", "quickHints",
     "crossBlockRefuse", "batchPartial", "blockNeedsWholeBlock", "blockRichRefuse",
     "blockTypeRefuse", "inCodeRange", "hintRichPreserved", "hintPasteRepair",
+    "menuCopyMarkdown", "copyMarkdownDone", "copyMarkdownEmpty", "copyMarkdownFail",
+    "diagExport", "diagNone", "diagDone", "diagCopied", "diagFail", "hintCompat",
 ];
 
 console.log("== A. i18n 目录全部 JSON 可解析（思源 response.json() 不抛错）==");
@@ -48,21 +50,32 @@ const i18nDir = path.join(__dirname, "..", "i18n");
 const files = fs.readdirSync(i18nDir).filter((f) => f.endsWith(".json"));
 assert(files.includes("zh_CN.json"), "存在 zh_CN.json");
 
-let parsed = null;
+const parsedFiles = {};
 for (const file of files) {
     const raw = fs.readFileSync(path.join(i18nDir, file), "utf8");
     try {
-        parsed = JSON.parse(raw);
-        assert(typeof parsed === "object" && parsed !== null, `${file} JSON.parse 通过`);
+        parsedFiles[file] = JSON.parse(raw);
+        assert(typeof parsedFiles[file] === "object" && parsedFiles[file] !== null, `${file} JSON.parse 通过`);
     } catch (e) {
         assert(false, `${file} JSON.parse 通过`, e.message);
     }
 }
 
-console.log("== B. 代码可见的键齐全且非空 ==");
-for (const key of REQUIRED_KEYS) {
-    const value = parsed ? parsed[key] : undefined;
-    assert(typeof value === "string" && value.trim().length > 0, `键 ${key} 存在且非空`);
+console.log("== B. 每个语言文件的代码可见键齐全且非空 ==");
+for (const file of Object.keys(parsedFiles)) {
+    for (const key of REQUIRED_KEYS) {
+        const value = parsedFiles[file][key];
+        assert(typeof value === "string" && value.trim().length > 0, `${file} 键 ${key} 存在且非空`);
+    }
+}
+
+console.log("== C. 各语言文件键集合一致 ==");
+const zhKeys = Object.keys(parsedFiles["zh_CN.json"] || {}).sort();
+for (const file of Object.keys(parsedFiles)) {
+    const keys = Object.keys(parsedFiles[file]).sort();
+    assert(JSON.stringify(keys) === JSON.stringify(zhKeys), `${file} 键集合与 zh_CN 一致`,
+        "缺少: " + zhKeys.filter((k) => !keys.includes(k)).join(", ") +
+        " / 多余: " + keys.filter((k) => !zhKeys.includes(k)).join(", "));
 }
 
 console.log(`\ni18n 资源测试: ${passed} 通过`);

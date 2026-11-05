@@ -1,4 +1,4 @@
-import { Menu, Plugin, showMessage } from "siyuan";
+import { fetchSyncPost, Menu, Plugin, showMessage } from "siyuan";
 import type { IEventBusMap } from "siyuan";
 import {
     convertMathToPlainText,
@@ -22,6 +22,16 @@ import {capturePasteContext, codeTargetFromProtyle, PasteContextSnapshot, resolv
 import {getLute, mdToSiyuanHTML} from "./siyuan-dom";
 import {convertUndelimitedLatex} from "./undelimited";
 import {capturePostPasteScope, PostPasteRepairTask, PostPasteScope} from "./post-paste-task";
+import {findConflictingPlugins} from "./compat";
+import {
+    buildDiagnostic,
+    diagnosticFileName,
+    formatDiagnostic,
+    PasteDiagnostic,
+    PasteDiagnosticMeta,
+    PERF_BUDGET_MS,
+} from "./diagnostics";
+import {joinBlocks} from "./copy-markdown";
 
 /** 场景 → 策略设置键（提示一键切换/策略读取共用；固定放行场景无策略键不参与切换）。 */
 const POLICY_KEY_OF_SCENARIO: Partial<Record<PasteScenario, PolicyKey>> = {
@@ -66,6 +76,10 @@ export default class PasteFixer extends Plugin {
     private disposed = false;
     /** 原生粘贴的块快照只供同一次官方事件使用，不在捕获阶段安排写回。 */
     private pasteScope: PostPasteScope | null = null;
+    /** 最近几次粘贴诊断（内存环形，最多 3 条；命令导出最近一条） */
+    private diagnostics: PasteDiagnostic[] = [];
+    /** 同类插件共存提示每次会话只弹一次 */
+    private compatHintShown = false;
     private readonly postPasteTask = new PostPasteRepairTask(
         scenario => !this.disposed && ["smart", "fix"].includes(this.scenarioPolicy(scenario)),
         count => showMessage(this.i18n.hintPasteRepair.replace("{n}", String(count)), 4000),
@@ -90,7 +104,10 @@ export default class PasteFixer extends Plugin {
     /** 事件总线 paste：唯一转换入口 */
     private onPaste = (event: CustomEvent<PasteDetail>) => {
         const detail = event.detail;
+        const started = performance.now();
+        const meta: PasteDiagnosticMeta = {scenario: "", action: "", source: "", quality: "", formulas: 0};
         const resolve = (value: unknown): void => {
+            this.recordDiagnostic(detail, meta, performance.now() - started);
             // 思源 3.8.6 在事件未取消时立即采用原载荷；resolve 的结果在微任务中
             // 处理。只有真正替换载荷才取消“官方插件事件”，让宿主等待结果。
             // 这里不取消原生 ClipboardEvent，附件/内部复制仍走宿主默认路径。
@@ -124,6 +141,8 @@ export default class PasteFixer extends Plugin {
                 hasFiles: snapRes.hasFiles || (!!files && files.length > 0),
                 getPolicy: (s) => this.scenarioPolicy(s),
             });
+            meta.scenario = handling.plan.scenario;
+            meta.action = handling.kind === "fix" ? "fix" : "pass:" + handling.reason;
             // 自动修复授权必须来自同一次官方决策。复杂富文本可以仅修坏公式，
             // 但关闭/保守/代码/附件/内部复制都不能借异步兜底绕过放行策略。
             if (handling.plan.action === "fix" && (handling.kind === "fix" || handling.reason === "rich") &&
@@ -157,6 +176,11 @@ export default class PasteFixer extends Plugin {
             }
             const fixed = decision?.markdown ?? null;
             const plain = fixed ?? textPlain;
+            if (decision) {
+                meta.source = decision.source;
+                meta.quality = decision.htmlQuality;
+                meta.formulas = fixed ? countMathFormulas(fixed) : 0;
+            }
 
             // 无需修复的文本，若含 $$ 块也升级为真公式块内部格式（前端 Lute 会把 $$ 降级成行内）
             if (!siyuanHTML && /\$\$/.test(plain)) {
@@ -446,6 +470,134 @@ export default class PasteFixer extends Plugin {
         }
     }
 
+    /** 记录本次粘贴诊断；超过耗时预算只告警，不改行为。 */
+    private recordDiagnostic(detail: PasteDetail, meta: PasteDiagnosticMeta, durationMs: number): void {
+        try {
+            const manifest = (this as unknown as {manifest?: {version?: string}}).manifest;
+            const record = buildDiagnostic({
+                meta,
+                durationMs,
+                pluginVersion: manifest?.version || "",
+                textPlain: detail.textPlain || "",
+                textHTML: detail.textHTML || "",
+                siyuanHTML: detail.siyuanHTML || "",
+            });
+            this.diagnostics.push(record);
+            if (this.diagnostics.length > 3) {
+                this.diagnostics.shift();
+            }
+            if (record.overBudget) {
+                console.warn("[paste-fixer] 本次粘贴处理耗时 " + record.durationMs +
+                    "ms，超过预算 " + PERF_BUDGET_MS + "ms（场景 " + meta.scenario + "）");
+            }
+        } catch (e) {
+            /* 诊断失败不影响粘贴 */
+        }
+    }
+
+    /** 导出最近一次粘贴诊断：写工作空间 /data，失败退化为复制到剪贴板。 */
+    private exportDiagnostics = async (): Promise<void> => {
+        const last = this.diagnostics[this.diagnostics.length - 1];
+        if (!last) {
+            showMessage(this.i18n.diagNone, 3000);
+            return;
+        }
+        const name = diagnosticFileName(new Date());
+        const text = formatDiagnostic(last);
+        try {
+            const form = new FormData();
+            form.append("path", "/data/paste-fixer-diagnostics");
+            form.append("isDir", "false");
+            form.append("modTime", String(Date.now()));
+            form.append("file", new Blob([text], {type: "application/json"}), name);
+            const response = await fetch("/api/file/putFile", {method: "POST", body: form});
+            const result = await response.json();
+            if (result.code !== 0) {
+                throw new Error(result.msg || "putFile 失败");
+            }
+            showMessage(this.i18n.diagDone.replace("{path}", "/data/paste-fixer-diagnostics/" + name), 6000);
+        } catch (e) {
+            try {
+                await navigator.clipboard.writeText(text);
+                showMessage(this.i18n.diagCopied, 6000);
+            } catch (err) {
+                showMessage(this.i18n.diagFail, 5000, "error");
+            }
+        }
+    };
+
+    /** 复制选中块为 Markdown（含 $...$ / $$...$$ 公式）。 */
+    private copyMarkdown = async (): Promise<void> => {
+        const ids = this.selectedBlockIds();
+        if (ids.length === 0) {
+            showMessage(this.i18n.copyMarkdownEmpty, 3000);
+            return;
+        }
+        try {
+            const blocks: string[] = [];
+            for (const id of ids) {
+                const result = await fetchSyncPost("/api/block/getBlockKramdown", {id});
+                const kramdown = result?.data?.kramdown || "";
+                if (kramdown) {
+                    blocks.push(kramdown);
+                }
+            }
+            const markdown = joinBlocks(blocks);
+            if (!markdown) {
+                showMessage(this.i18n.copyMarkdownEmpty, 3000);
+                return;
+            }
+            await navigator.clipboard.writeText(markdown);
+            showMessage(this.i18n.copyMarkdownDone.replace("{n}", String(blocks.length)), 4000);
+        } catch (e) {
+            showMessage(this.i18n.copyMarkdownFail, 5000, "error");
+        }
+    };
+
+    /** 选中块 id：多选优先，否则取光标所在块。 */
+    private selectedBlockIds(): string[] {
+        const ids: string[] = [];
+        document.querySelectorAll(".protyle-wysiwyg--select[data-node-id]").forEach((element) => {
+            const id = element.getAttribute("data-node-id");
+            if (id && !ids.includes(id)) {
+                ids.push(id);
+            }
+        });
+        if (ids.length > 0) {
+            return ids;
+        }
+        const range = window.getSelection()?.rangeCount ? window.getSelection()?.getRangeAt(0) : null;
+        if (!range) {
+            return ids;
+        }
+        const node = range.startContainer;
+        const element = node.nodeType === 1 ? node as Element : node.parentElement;
+        const block = element?.closest("[data-node-id]");
+        const id = block?.getAttribute("data-node-id");
+        return id ? [id] : [];
+    }
+
+    /** 同类插件共存提示：只读 /data/plugins 目录名，读不到就当没有冲突。 */
+    private async checkConflictingPlugins(): Promise<void> {
+        if (this.compatHintShown) {
+            return;
+        }
+        try {
+            const result = await fetchSyncPost("/api/file/readDir", {path: "/data/plugins"});
+            const entries = Array.isArray(result?.data) ? result.data : [];
+            const names = entries.filter((entry: {isDir?: boolean}) => entry?.isDir)
+                .map((entry: {name?: string}) => String(entry.name || ""));
+            const conflicts = findConflictingPlugins(names);
+            if (conflicts.length === 0) {
+                return;
+            }
+            this.compatHintShown = true;
+            showMessage(this.i18n.hintCompat.replace("{names}", conflicts.join("、")), 8000);
+        } catch (e) {
+            /* 读目录失败不提示 */
+        }
+    }
+
     async onload() {
         await this.bootstrap();
     }
@@ -498,6 +650,18 @@ export default class PasteFixer extends Plugin {
             console.error("[paste-fixer] 命令注册失败", e);
         }
         try {
+            this.addCommand({
+                langKey: "menuCopyMarkdown",
+                callback: () => void this.copyMarkdown(),
+            });
+            this.addCommand({
+                langKey: "diagExport",
+                callback: () => void this.exportDiagnostics(),
+            });
+        } catch (e) {
+            console.error("[paste-fixer] 命令注册失败", e);
+        }
+        try {
             this.topBarElement = this.addTopBar({
                 icon: "iconMath",
                 title: this.i18n.name,
@@ -508,6 +672,7 @@ export default class PasteFixer extends Plugin {
             console.error("[paste-fixer] 顶栏按钮注册失败", e);
         }
         showMessage(this.i18n.name + " 已加载", 2000);
+        void this.checkConflictingPlugins();
     }
 
     onunload() {

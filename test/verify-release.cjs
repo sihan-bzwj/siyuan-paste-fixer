@@ -22,6 +22,8 @@ check(fs.existsSync(path.join(dist, "index.js")), "dist/index.js 存在");
 check(fs.existsSync(path.join(dist, "plugin.json")), "dist/plugin.json 存在");
 check(fs.existsSync(path.join(dist, "i18n", "zh_CN.json")), "dist/i18n/zh_CN.json 存在");
 check(fs.existsSync(path.join(dist, "README.md")), "dist/README.md 存在");
+check(fs.existsSync(path.join(dist, "README.en.md")), "dist/README.en.md 存在");
+check(fs.existsSync(path.join(dist, "i18n", "en_US.json")), "dist/i18n/en_US.json 存在");
 check(fs.existsSync(path.join(dist, "icon.png")), "dist/icon.png 存在");
 check(fs.existsSync(path.join(dist, "preview.png")), "dist/preview.png 存在");
 

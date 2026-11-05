@@ -52,5 +52,15 @@
   "blockTypeRefuse": "该块类型不支持整块转换（保护块类型不变）",
   "inCodeRange": "代码区域内不参与公式转换",
   "hintRichPreserved": "检测到复杂富文本（链接/图片/表格等），为避免丢失格式已原样粘贴；可选中公式后右键「强制转换为公式」",
-  "hintPasteRepair": "已修复 {n} 个渲染报错的公式（粘贴内容里原本会显示 KaTeX parse error）"
+  "hintPasteRepair": "已修复 {n} 个渲染报错的公式（粘贴内容里原本会显示 KaTeX parse error）",
+  "menuCopyMarkdown": "复制为 Markdown（含公式）",
+  "copyMarkdownDone": "已复制 {n} 个块为 Markdown",
+  "copyMarkdownEmpty": "请先选中要复制的块",
+  "copyMarkdownFail": "复制失败",
+  "diagExport": "导出最近一次粘贴诊断",
+  "diagNone": "还没有粘贴记录可导出",
+  "diagDone": "诊断包已保存：{path}",
+  "diagCopied": "写文件失败，诊断包已复制到剪贴板",
+  "diagFail": "诊断导出失败",
+  "hintCompat": "检测到同类插件（{names}）也在改写粘贴内容，两者可能互相覆盖：建议只留一个，或把本插件设为「保守」"
 }

@@ -132,10 +132,18 @@ async function main() {
     assert(kres.text.includes("$x_i^2$"), "行内 KaTeX 取回 TeX 源码");
     katexCheck(fixLatexText(kres.text), "KaTeX 片段");
 
-    console.log("== 6. Word OMML（安全跳过） ==");
+    console.log("== 6. Word OMML（v0.3.0 起转为 LaTeX） ==");
     const ooml = '<m:oMath><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath>';
     const oomlres = mml.convertMathMLInHTML(ooml);
-    assert(oomlres.count === 0 && oomlres.text === "", "OMML 不转换不崩溃");
+    assert(oomlres.count === 1, "OMML 计入转换（实际 " + oomlres.count + "）");
+    assert(oomlres.text.includes("\\frac{a}{b}"), "OMML 分式转 LaTeX", oomlres.text);
+    assert(oomlres.sourceKinds.includes("omml"), "来源标记 omml");
+    katexCheck(fixLatexText(oomlres.text), "OMML 片段");
+    const wordPara = '<p>由公式 <m:oMath><m:sSup><m:e><m:r><m:t>E</m:t></m:r></m:e>' +
+        '<m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath> 可知</p>';
+    const wordRes = mml.convertMathMLInHTML(wordPara);
+    assert(wordRes.text.includes("由公式") && wordRes.text.includes("可知"), "OMML 段落正文保留", wordRes.text);
+    katexCheck(fixLatexText(wordRes.text), "OMML 段落");
 
     console.log("== 7. 混合页面（正文 + 链接 + 图片 + 公式） ==");
     const mixed = "<p>参见 <a href=\"https://en.wikipedia.org/wiki/Matrix_multiplication\">矩阵乘法</a>。" +
@@ -145,7 +153,8 @@ async function main() {
     assert(mres.count >= 1, "混合页面有转换");
     assert(mres.text.includes("矩阵乘法"), "链接文字保留");
     assert(mres.text.includes("$$") && mres.text.includes("A = B"), "显示公式转块级");
-    assert(!mres.text.includes("x.png"), "图片 URL 不进文本");
+    assert(mres.text.includes("![fig1](x.png)"), "图片保留为 Markdown（v0.3.0 不再丢图）");
+    assert(!/<img[\s>]/.test(mres.text), "图片不残留 HTML");
 
     console.log("== 8. annotation 不被 mathml2latex 二次处理 ==");
     const anno = "<p>x = <math><semantics><mrow><mi>x</mi><mo>=</mo><mi>y</mi></mrow>" +

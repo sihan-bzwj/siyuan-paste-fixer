@@ -1116,6 +1116,37 @@ export function maskProtectedSegments(text: string): MaskedMarkdown {
     };
 }
 
+const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
+const INLINE_MATH_RE = /(\$[^$\n]+?\$)/;
+
+/**
+ * 表格行安全（v0.3.0）：GFM 表格里不能出现块级公式，公式里的裸 | 也会把整张表
+ * 撕开。只对"整行是表格行"的文本生效：块级公式降级为行内，公式内 | 转 \vert。
+ */
+function guardTableSegment(text: string): string {
+    return text.split("\n").map((line) => {
+        if (!TABLE_ROW_RE.test(line)) {
+            return line;
+        }
+        const inline = line.replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex: string) => "$" + tex.trim() + "$");
+        return inline.split(INLINE_MATH_RE)
+            .map((part, i) => (i % 2 === 1 ? part.replace(/(?<!\\)\|/g, "\\vert ") : part))
+            .join("");
+    }).join("\n");
+}
+
+/** 表格保护段（代码围栏等）原样保留，不参与表格改写。 */
+function guardTableRows(text: string): string {
+    if (!text.includes("|")) {
+        return text;
+    }
+    let out = "";
+    for (const segment of splitMarkdownSegments(text)) {
+        out += segment.protected ? segment.text : guardTableSegment(segment.text);
+    }
+    return out;
+}
+
 /**
  * 修复整段文本。代码围栏（```）内部不处理。
  * 无数学信号时保证返回原字符串。
@@ -1128,7 +1159,7 @@ export function fixLatexText(text: string): string {
     for (const segment of splitMarkdownSegments(text)) {
         out += segment.protected ? segment.text : fixTextSegment(segment.text);
     }
-    return out;
+    return guardTableRows(out);
 }
 
 /**
